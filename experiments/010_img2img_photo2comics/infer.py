@@ -9,10 +9,12 @@ from torch.utils.data import DataLoader
 from src.img2img import Img2ImgDiffusionUNet, PairedImageDataset
 from src.img2img.diffusion import DiffusionConfig, GaussianImageDiffusion
 from src.img2img.render import save_inference_panel, save_progress_strip
+from src.utils.config import apply_yaml_config
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="Run reverse-diffusion inference for img2img")
+    p = apply_yaml_config(p)
     p.add_argument("data_root")
     p.add_argument("--checkpoint", required=True)
     p.add_argument("--batch-size", type=int, default=4)
@@ -34,7 +36,10 @@ def main():
 
     ckpt = torch.load(args.checkpoint, map_location=device)
     train_cfg = ckpt.get("config", {})
-    model = Img2ImgDiffusionUNet(pretrained_source_encoder=False).to(device)
+    model = Img2ImgDiffusionUNet(
+        pretrained_source_encoder=False,
+        source_in_stem=train_cfg.get("source_in_stem", False),
+    ).to(device)
     state_key = "ema_model" if args.use_ema and "ema_model" in ckpt else "model"
     model.load_state_dict(ckpt[state_key])
     model.eval()
