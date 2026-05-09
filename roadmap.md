@@ -17,23 +17,22 @@
 - visualize forward corruption and reverse denoising
 - tiny MLP with timestep embedding
 
-### Phase B — tiny image diffusion
-- `experiments/001_image_64`
-- small UNet baseline
-- CIFAR-10 or folder dataset
-- image samples + EMA checkpoint + simple metrics
+### Phase B — pixel-space img2img
+- small conditional diffusion UNet
+- source photo -> target comic/stylized image
+- multiscale source conditioning
+- one bottleneck attention block with SDPA
+- visual comparison logging by default
 
-### Phase C — latent image diffusion
-- `experiments/002_latent_image`
-- tiny VAE encoder/decoder or pluggable pretrained one
-- train diffusion in latent space
-- explain why latent beats pixel-space for scaling
+### Phase C — practical img2img training
+- paired or pseudo-paired dataset pipeline
+- EMA, better progress artifacts, optional hosted logging
+- study structure preservation vs style strength
 
-### Phase D — toy video diffusion
-- `experiments/100_video_toy`
-- moving-MNIST or bouncing shapes
-- temporal conv or temporal attention
-- short low-res clips only
+### Phase D — minimal V2V
+- extend img2img to short clips
+- previous-frame conditioning first
+- keep temporal machinery as small as possible
 
 ## Stretch goals
 - class conditioning
