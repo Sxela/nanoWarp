@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import subprocess
 from pathlib import Path
 
 import torch
@@ -15,6 +16,28 @@ from src.img2img.flow import FlowConfig, RectifiedImageFlow
 from src.img2img.render import save_val_panel
 from src.toy_diffusion.render import save_loss_plot
 from src.utils.config import apply_yaml_config
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def git_state(cwd: Path) -> dict[str, str]:
+    def _run(args: list[str]) -> str:
+        try:
+            out = subprocess.run(args, cwd=str(cwd), capture_output=True, text=True, check=True)
+            return out.stdout.strip()
+        except Exception:
+            return ""
+    commit = _run(["git", "rev-parse", "HEAD"])
+    short = _run(["git", "rev-parse", "--short=12", "HEAD"])
+    branch = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    porcelain = _run(["git", "status", "--porcelain"])
+    return {
+        "commit": commit or "unknown",
+        "commit_short": short or "unknown",
+        "branch": branch or "unknown",
+        "dirty": "yes" if porcelain else "no",
+    }
 
 
 def parse_args():
@@ -72,6 +95,15 @@ def parse_args():
     p.add_argument("--checkpoint-every", type=int, default=0,
                    help="If >0, save model.pt every N steps (in addition to the final save). "
                         "Lets validate.py run mid-training in a parallel process.")
+    p.add_argument("--wandb", action="store_true",
+                   help="Log metrics + panels to Weights & Biases. Requires `wandb login` already done.")
+    p.add_argument("--wandb-project", default="nanoWarp")
+    p.add_argument("--wandb-run-name", default=None,
+                   help="Defaults to the basename of --outdir.")
+    p.add_argument("--wandb-tags", default=None,
+                   help="Comma-separated tag list, e.g. 'flow,no-encoder,exp08'.")
+    p.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online",
+                   help="online (default) syncs to wandb cloud. offline writes to disk only (sync later with `wandb sync`).")
     return p.parse_args()
 
 
@@ -119,6 +151,25 @@ def main():
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
 
+    git = git_state(REPO_ROOT)
+    print(f"git commit={git['commit_short']} branch={git['branch']} dirty={git['dirty']}")
+
+    wandb = None
+    if args.wandb:
+        import wandb as _wandb
+        wandb = _wandb
+        tags = [t.strip() for t in args.wandb_tags.split(",")] if args.wandb_tags else None
+        run_name = args.wandb_run_name or outdir.name
+        wandb.init(
+            project=args.wandb_project,
+            name=run_name,
+            tags=tags,
+            mode=args.wandb_mode,
+            config={**vars(args), **{f"git_{k}": v for k, v in git.items()}},
+            dir=str(outdir),
+        )
+        print(f"wandb run: {wandb.run.name}  ({wandb.run.url})")
+
     train_ds, val_ds = build_train_val_datasets(
         train_root=args.data_root,
         val_root=args.val_root,
@@ -148,6 +199,14 @@ def main():
     ema = EMA(model, decay=args.ema_decay)
     diffusion, method_cfg = build_method(args, device)
     print(f"method={args.method} method_cfg={method_cfg.__dict__}")
+    if wandb is not None:
+        wandb.config.update({
+            "params_total": total_params,
+            "params_trainable": trainable_params,
+            "params_frozen": total_params - trainable_params,
+            "unet_channels": list(model.unet_channels),
+            "method_cfg": method_cfg.__dict__,
+        }, allow_val_change=True)
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
     aux_lpips = None
     if args.lpips_weight > 0:
@@ -195,6 +254,16 @@ def main():
                 f"loss {loss.item():.6f} | diffusion {float(diffusion_loss):.6f} | lpips {float(lpips_loss):.6f}{extra}"
             )
             save_loss_plot(losses, outdir / "loss.png")
+            if wandb is not None:
+                wandb.log({
+                    "train/loss": float(loss.item()),
+                    "train/method_loss": float(diffusion_loss),
+                    "train/lpips_loss": float(lpips_loss),
+                    "train/lr": cur_lr,
+                    "train/grad_norm": grad_norms[-1] if grad_norms else None,
+                    "train/t_low": t_low,
+                    "train/t_high": t_high,
+                }, step=step)
         if step % args.panel_every == 0 or step == args.steps:
             model.eval()
             with torch.no_grad():
@@ -206,14 +275,17 @@ def main():
                     log_every=None,
                 )
             model.train()
+            panel_path = outdir / f"panel_step_{step:06d}.png"
             save_val_panel(
                 source,
                 target,
                 samples_panel,
                 x0_hat,
-                outdir / f"panel_step_{step:06d}.png",
+                panel_path,
                 high_t_label="x0_hat_random_t",
             )
+            if wandb is not None:
+                wandb.log({"train/panel": wandb.Image(str(panel_path))}, step=step)
         if step % args.val_every == 0 or step == args.steps:
             val_losses = []
             for _ in range(args.val_batches):
@@ -225,6 +297,8 @@ def main():
             mean_val = sum(val_losses) / len(val_losses)
             val_history.append(mean_val)
             print(f"val step {step:5d} | mean_loss {mean_val:.6f}")
+            if wandb is not None:
+                wandb.log({"val/mean_loss_random_t": mean_val}, step=step)
 
         if args.checkpoint_every > 0 and step % args.checkpoint_every == 0 and step != args.steps:
             torch.save(
@@ -258,6 +332,11 @@ def main():
             "mean_grad_norm_last_50": (sum(grad_norms[-50:]) / min(50, len(grad_norms))) if grad_norms else None,
         }, f, indent=2)
     print(f"saved checkpoint to {outdir / 'model.pt'}")
+    if wandb is not None:
+        wandb.summary["final_loss"] = losses[-1]
+        wandb.summary["mean_loss_last_50"] = sum(losses[-50:]) / min(50, len(losses))
+        wandb.summary["last_val_loss"] = val_history[-1] if val_history else None
+        wandb.finish()
 
 
 if __name__ == "__main__":

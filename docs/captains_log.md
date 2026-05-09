@@ -162,7 +162,7 @@ python scripts/train.py img2img-v1 data/photo2anime `
 - Killed at step ~6000 only because we wanted to restart with intermediate
   checkpoint saving (the running process didn't have it).
 
-### exp07b — same as exp07 but with mid-run checkpoints + full-sample panels (20k steps) — RUNNING
+### exp07b — same as exp07 but with mid-run checkpoints + full-sample panels (20k steps) — DONE
 
 After adding `--checkpoint-every` and replacing the random-t panel with a
 full-sample panel:
@@ -188,32 +188,121 @@ python scripts/sample.py img2img-v1-val data/photo2anime `
 # step-5000 watcher armed; will fire automatically when that checkpoint lands.
 ```
 
-Step-1k val: `mean_lpips_sampled=0.219, mean_ssim_sampled=0.616`. Already
-substantially above any diffusion run, but caveat: at step 1k the model's
-output is mostly source-with-mild-color-shift, not real anime stylization yet
-— the metrics partly reflect source≈target structural similarity.
+Val curve across the run:
 
-Through step 4k (latest panel at the time of writing), output remains
-"source plus a touch of palette/contrast shift." No flat-color regions, no
-ink lines yet. Real anime stylization presumably needs many more steps of
-training given the 287-pair dataset.
+| step | loss | SSIM ↑ | LPIPS ↓ |
+|---:|---:|---:|---:|
+|  1k | 0.0177 | 0.616 | 0.219 |
+|  5k | 0.0100 | 0.629 | 0.176 |
+| 10k | 0.0029 | 0.648 | 0.190 |
+| 15k | 0.0026 | 0.691 | 0.166 |
+| 20k | 0.0025 | 0.701 | 0.159 |
 
-Final validation (when training finishes):
+- MSE loss had nearly plateaued by 15k, but **SSIM and LPIPS were still
+  improving** at 20k. Pixel-MSE convergence is independent of perceptual
+  quality at this scale — the model was still refining detail that doesn't
+  show up in MSE.
+- Visually, the predicted-target column was still mostly
+  "source + mild palette shift" through step 4k; meaningful anime stylization
+  was emerging slowly. Real flat-color stylization didn't really kick in
+  until LPIPS aux was added (see exp07b+LPIPS below).
+
+### exp07b + LPIPS 0.2 — same config, perceptual aux loss added — DONE
+
+Same FM + freeze=all + dropout + safety nets, plus `--lpips-weight 0.2`.
+Hypothesis (from exp07b's "MSE plateaued / perceptual still climbing"
+pattern): LPIPS aux can drive what MSE no longer can.
 
 ```powershell
-python scripts/sample.py img2img-v1-val data/photo2anime `
-    --checkpoint out/exp07b_flow_chkpt_20k/model.pt --use-ema `
-    --sample-steps 20 --max-batches 13 --panel-count 4 --save-progress-strip `
-    --outdir out/exp07b_val_final
+python scripts/train.py img2img-v1 data/photo2anime `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --freeze-source-encoder all --source-dropout 0.15 `
+    --lpips-weight 0.2 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --checkpoint-every 1000 --sample-panel-steps 20 `
+    --outdir out/exp07b_lpips_20k
 ```
+
+- **Step-2k panel already shows real anime stylization** — flattened hair
+  forms, anime-style eye treatment, smoothed skin / sharpened edges, palette
+  shift. Identity / pose / composition preserved exactly.
+- For comparison, exp07b (no LPIPS) at step 2k was barely stylized. LPIPS aux
+  was the missing ingredient.
+- Note for FM specifically: LPIPS aux lives on `x_target_hat = x_t + (1-t)·v_hat`,
+  which is meaningful at every `t`. Unlike diffusion (where random-t
+  `x0_hat` reconstruction is partly gameable through `x_t` leakage), FM's
+  LPIPS target is non-gameable, so the aux signal converts directly to
+  perceptual quality.
+
+### exp08 — drop source encoder, widen UNet, keep LPIPS — PLANNED
+
+Following findings from exp07b + exp07b+LPIPS:
+- Encoder freezing fixed the optimizer collapse (exp05/06 → exp07b stable).
+- LPIPS aux unlocked the actual stylization (exp07b → exp07b+LPIPS).
+- Open question: is the (frozen) ResNet18 encoder + multiscale fuse path
+  contributing useful semantic priors, or is `cat([source, x_t])` at the input
+  stem already enough?
+
+exp08 tests this directly by dropping the encoder + fuses entirely and
+widening the UNet to compensate (so total compute matches exp07b's ~42.7M).
+
+After adding `--no-source-encoder` and refactoring `--model-ch` to scale the
+whole UNet (widths are multiples of `model_ch`):
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 88 `
+    --source-dropout 0.15 `
+    --lpips-weight 0.2 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --checkpoint-every 1000 --sample-panel-steps 20 `
+    --wandb --wandb-project nanoWarp --wandb-tags "flow,no-encoder,lpips,exp08" `
+    --outdir out/exp08_noenc_lpips_mc88_20k
+```
+
+Param count: 43.9M total, all trainable (vs exp07b's 42.7M total with
+11.2M frozen). UNet widths: 88 / 176 / 352 / 352 / 704.
+
+Predictions:
+- If exp08 ≈ or > exp07b+LPIPS at step 20k → encoder was redundant given stem
+  concat + larger UNet. Smaller, simpler model wins.
+- If exp08 < exp07b+LPIPS → ImageNet semantic priors in the encoder were
+  doing real work; keep it. Next move would be to test `freeze=all` with the
+  *unmodified* ResNet (no fuses, just stem) to isolate the prior contribution.
+
+### Weights & Biases (added 2026-05-10)
+
+The trainer now logs to wandb when `--wandb` is passed. Captures:
+
+- All CLI args as `wandb.config`.
+- Git commit hash, short hash, branch, dirty flag (as `git_*` config keys).
+- Param counts (total / trainable / frozen) and resolved UNet channels.
+- Per-log-step: `train/loss`, `train/method_loss`, `train/lpips_loss`,
+  `train/lr`, `train/grad_norm`, `train/t_low/high`.
+- Per-panel-step: rendered panel as `train/panel` (wandb image).
+- Per-val-step: `val/mean_loss_random_t`.
+- Run summary: `final_loss`, `mean_loss_last_50`, `last_val_loss`.
+
+Login once with `wandb login` then add `--wandb` to any train command.
+Use `--wandb-mode offline` for offline runs (sync later with `wandb sync`).
+
+Side-by-side comparison is the point — past runs (exp01–exp07b+LPIPS)
+were not logged to wandb. From exp08 onward, runs will land in the
+`nanoWarp` project for visual comparison.
 
 ---
 
-## Open follow-ups (after exp07b lands)
+## Open follow-ups
 
 - Compute "source-as-prediction" baseline SSIM/LPIPS to know the floor any
   conditional model has to beat. Five-line script.
-- Replace `save_loss_plot` with log-y + rolling mean.
-- exp08 ablation: drop the source encoder entirely, use `--source-in-stem` +
-  smaller UNet, see if frozen-ResNet conditioning was actually contributing.
-- Latent flow matching once the pixel-space pipeline is producing clean output.
+- Replace `save_loss_plot` with log-y + rolling mean (now optional since
+  wandb handles smoothing).
+- Trainer `--resume` support to continue from a saved checkpoint
+  (~10 lines: load model + EMA + optimizer state).
+- Latent flow matching once the pixel-space pipeline is solid.
+- Once exp08 lands: ablate `freeze=all` vs `freeze=partial` on the
+  encoder-on path now that we know freeze=all is stable.
