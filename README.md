@@ -232,3 +232,34 @@ nanoWarp/
 ```
 
 This shape will change as the real img2img path crystallizes.
+
+---
+
+## Setup from scratch
+
+```bash
+./install.sh
+source .venv/bin/activate
+```
+
+Main dependencies currently live in `requirements.txt`.
+
+## Validation
+
+For img2img, we want validation to be visible too, not just one scalar.
+
+Current validation flow:
+
+```bash
+python3 scripts/sample.py img2img-v1-val <val_data_root> --checkpoint <checkpoint_path> --outdir out/img2img_v1_val
+```
+
+This writes:
+- `val_metrics.json`
+- `val_panel_*.png`
+
+The validation panels show:
+- source
+- target
+- noisy target
+- reconstructed `x0_hat`
