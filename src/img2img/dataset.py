@@ -116,10 +116,18 @@ class PairedImageAugment:
 
 
 class PairedImageDataset(Dataset):
-    def __init__(self, root: str | Path, source_dir: str = "source", target_dir: str = "target", augment: PairedImageAugment | None = None):
+    def __init__(
+        self,
+        root: str | Path,
+        source_dir: str = "source",
+        target_dir: str = "target",
+        augment: PairedImageAugment | None = None,
+        split: str | None = None,
+    ):
         self.root = Path(root)
-        self.source_root = self.root / source_dir
-        self.target_root = self.root / target_dir
+        base_root = self.root / split if split and (self.root / split).exists() else self.root
+        self.source_root = base_root / source_dir
+        self.target_root = base_root / target_dir
         self.augment = augment or PairedImageAugment()
 
         src_files = _list_images(self.source_root)
@@ -144,3 +152,26 @@ class PairedImageDataset(Dataset):
             "target": TF.to_tensor(tgt_aug),
             "source_geom": TF.to_tensor(src_geom),
         }
+
+
+class IdentityPairedAugment:
+    def __init__(self, image_size: int = 128):
+        self.image_size = image_size
+
+    def __call__(self, src: Image.Image, tgt: Image.Image, seed: int | None = None):
+        src = TF.resize(src, [self.image_size, self.image_size], interpolation=InterpolationMode.BILINEAR)
+        tgt = TF.resize(tgt, [self.image_size, self.image_size], interpolation=InterpolationMode.BILINEAR)
+        return src, tgt, src.copy()
+
+
+def build_train_val_datasets(
+    train_root: str | Path,
+    val_root: str | Path | None = None,
+    image_size: int = 128,
+    train_split: str | None = None,
+    val_split: str | None = None,
+):
+    train_ds = PairedImageDataset(train_root, augment=PairedImageAugment(AugmentConfig(image_size=image_size)), split=train_split)
+    resolved_val_root = val_root or train_root
+    val_ds = PairedImageDataset(resolved_val_root, augment=IdentityPairedAugment(image_size=image_size), split=val_split)
+    return train_ds, val_ds

@@ -244,6 +244,9 @@ source .venv/bin/activate
 
 Main dependencies currently live in `requirements.txt`.
 
+Example training config:
+- `configs/photo2comics_baseline.yaml`
+
 ## Validation
 
 For img2img, we want validation to be visible too, not just one scalar.
@@ -263,3 +266,11 @@ The validation panels show:
 - target
 - noisy target
 - reconstructed `x0_hat`
+
+Current validation metrics include:
+- diffusion loss
+- SSIM
+- LPIPS
+
+See also:
+- `docs/first_experiments.md`

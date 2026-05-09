@@ -1,0 +1,15 @@
+image_size: 128
+batch_size: 4
+steps: 2000
+lr: 0.0002
+num_workers: 0
+log_every: 25
+panel_every: 100
+val_every: 200
+val_batches: 4
+ema_decay: 0.999
+train_split: train
+val_split: val
+source_in_stem: false
+lpips_weight: 0.0
+

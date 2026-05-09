@@ -42,13 +42,18 @@ class GaussianImageDiffusion:
         x0 = (x_t - sqrt_1mab * eps_hat) / sqrt_ab.clamp(min=1e-8)
         return x0.clamp(0.0, 1.0)
 
-    def training_loss(self, model, source: torch.Tensor, target: torch.Tensor):
+    def training_loss(self, model, source: torch.Tensor, target: torch.Tensor, aux_lpips=None, aux_lpips_weight: float = 0.0):
         t = torch.randint(0, self.config.timesteps, (target.shape[0],), device=target.device)
         x_t, noise = self.q_sample(target, t)
         eps_hat = model(source, x_t, t)
-        loss = F.mse_loss(eps_hat, noise)
+        diffusion_loss = F.mse_loss(eps_hat, noise)
         x0_hat = self.predict_x0_from_eps(x_t, t, eps_hat)
-        return loss, t, x_t, noise, eps_hat, x0_hat
+        lpips_loss = torch.tensor(0.0, device=target.device)
+        loss = diffusion_loss
+        if aux_lpips is not None and aux_lpips_weight > 0:
+            lpips_loss = aux_lpips(x0_hat, target).mean()
+            loss = loss + aux_lpips_weight * lpips_loss
+        return loss, t, x_t, noise, eps_hat, x0_hat, diffusion_loss.detach(), lpips_loss.detach()
 
     def make_sampling_schedule(self, sample_steps: int) -> list[int]:
         sample_steps = max(1, min(sample_steps, self.config.timesteps))

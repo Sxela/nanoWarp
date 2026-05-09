@@ -208,8 +208,10 @@ class Img2ImgDiffusionUNet(nn.Module):
         time_dim: int = 128,
         pretrained_source_encoder: bool = True,
         freeze_source_stages: tuple[str, ...] = ("stem", "layer1"),
+        source_in_stem: bool = False,
     ):
         super().__init__()
+        self.source_in_stem = source_in_stem
         self.source_encoder = SourceEncoder(
             in_ch=3,
             pretrained=pretrained_source_encoder,
@@ -217,7 +219,8 @@ class Img2ImgDiffusionUNet(nn.Module):
         )
         self.time_mlp = TimeMLP(time_dim)
 
-        self.in_conv = nn.Conv2d(in_ch, model_ch, 3, padding=1)
+        stem_in_ch = in_ch + 3 if source_in_stem else in_ch
+        self.in_conv = nn.Conv2d(stem_in_ch, model_ch, 3, padding=1)
 
         self.down1 = ResBlock(model_ch, 64, time_dim * 4)
         self.fuse1 = FuseBlock(64, 64)
@@ -256,7 +259,8 @@ class Img2ImgDiffusionUNet(nn.Module):
         src_feats = self.source_encoder(source)
         t_emb = self.time_mlp(t)
 
-        x0 = self.in_conv(noisy_target)
+        stem_input = torch.cat([source, noisy_target], dim=1) if self.source_in_stem else noisy_target
+        x0 = self.in_conv(stem_input)
 
         h1 = self.fuse1(self.down1(x0, t_emb), src_feats[0])
         h2 = self.fuse2(self.down2(self.ds1(h1), t_emb), src_feats[1])
