@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import math
+import warnings
 
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.hub import load_state_dict_from_url
+
+
+RESNET18_URL = "https://download.pytorch.org/models/resnet18-f37072fd.pth"
 
 
 def timestep_embedding(timesteps: torch.Tensor, dim: int) -> torch.Tensor:
@@ -42,40 +47,73 @@ class BasicBlock(nn.Module):
         self.bn1 = nn.BatchNorm2d(out_ch)
         self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1, bias=False)
         self.bn2 = nn.BatchNorm2d(out_ch)
-        self.act = nn.SiLU()
-        self.skip = None
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = None
         if stride != 1 or in_ch != out_ch:
-            self.skip = nn.Sequential(
+            self.downsample = nn.Sequential(
                 nn.Conv2d(in_ch, out_ch, 1, stride=stride, bias=False),
                 nn.BatchNorm2d(out_ch),
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        identity = x if self.skip is None else self.skip(x)
-        x = self.act(self.bn1(self.conv1(x)))
+        identity = x if self.downsample is None else self.downsample(x)
+        x = self.relu(self.bn1(self.conv1(x)))
         x = self.bn2(self.conv2(x))
-        return self.act(x + identity)
+        return self.relu(x + identity)
 
 
 class SourceEncoder(nn.Module):
-    """ResNet18-ish source encoder without torchvision dependency."""
+    """ResNet18-compatible source encoder with optional ImageNet weights and freeze controls."""
 
-    def __init__(self, in_ch: int = 3):
+    def __init__(self, in_ch: int = 3, pretrained: bool = True, freeze_stages: tuple[str, ...] = ("stem", "layer1")):
         super().__init__()
-        self.stem = nn.Sequential(
-            nn.Conv2d(in_ch, 64, 7, stride=2, padding=3, bias=False),
-            nn.BatchNorm2d(64),
-            nn.SiLU(),
-        )
-        self.pool = nn.MaxPool2d(3, stride=2, padding=1)
+        self.conv1 = nn.Conv2d(in_ch, 64, 7, stride=2, padding=3, bias=False)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU(inplace=True)
+        self.maxpool = nn.MaxPool2d(3, stride=2, padding=1)
         self.layer1 = nn.Sequential(BasicBlock(64, 64), BasicBlock(64, 64))
         self.layer2 = nn.Sequential(BasicBlock(64, 128, stride=2), BasicBlock(128, 128))
         self.layer3 = nn.Sequential(BasicBlock(128, 256, stride=2), BasicBlock(256, 256))
         self.layer4 = nn.Sequential(BasicBlock(256, 512, stride=2), BasicBlock(512, 512))
 
+        if pretrained:
+            self.load_pretrained_weights()
+        if freeze_stages:
+            self.freeze_stages(freeze_stages)
+
+    def load_pretrained_weights(self):
+        try:
+            state = load_state_dict_from_url(RESNET18_URL, map_location="cpu", progress=True)
+            missing, unexpected = self.load_state_dict(state, strict=False)
+            if missing:
+                warnings.warn(f"SourceEncoder missing pretrained keys: {missing}")
+            if unexpected:
+                warnings.warn(f"SourceEncoder unexpected pretrained keys: {unexpected}")
+        except Exception as e:
+            warnings.warn(f"Falling back to random SourceEncoder init; failed to load ResNet18 weights: {e}")
+
+    def freeze_stages(self, stages: tuple[str, ...] = ("stem", "layer1")):
+        for stage in stages:
+            if stage == "stem":
+                modules = [self.conv1, self.bn1]
+            else:
+                modules = [getattr(self, stage)]
+            for module in modules:
+                for param in module.parameters():
+                    param.requires_grad = False
+
+    def trainable_summary(self) -> dict[str, bool]:
+        return {
+            "stem": any(p.requires_grad for p in list(self.conv1.parameters()) + list(self.bn1.parameters())),
+            "layer1": any(p.requires_grad for p in self.layer1.parameters()),
+            "layer2": any(p.requires_grad for p in self.layer2.parameters()),
+            "layer3": any(p.requires_grad for p in self.layer3.parameters()),
+            "layer4": any(p.requires_grad for p in self.layer4.parameters()),
+        }
+
     def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
-        f0 = self.stem(x)          # 64x64 for 128 input
-        x = self.pool(f0)          # 32x32
+        f0 = self.relu(self.bn1(self.conv1(x)))  # 64x64 for 128 input
+        x = self.maxpool(f0)                     # 32x32
         f1 = self.layer1(x)        # 32x32
         f2 = self.layer2(f1)       # 16x16
         f3 = self.layer3(f2)       # 8x8
@@ -162,9 +200,21 @@ class Upsample(nn.Module):
 class Img2ImgDiffusionUNet(nn.Module):
     """Pixel-space conditional diffusion skeleton for photo -> comics."""
 
-    def __init__(self, in_ch: int = 3, model_ch: int = 64, out_ch: int = 3, time_dim: int = 128):
+    def __init__(
+        self,
+        in_ch: int = 3,
+        model_ch: int = 64,
+        out_ch: int = 3,
+        time_dim: int = 128,
+        pretrained_source_encoder: bool = True,
+        freeze_source_stages: tuple[str, ...] = ("stem", "layer1"),
+    ):
         super().__init__()
-        self.source_encoder = SourceEncoder(in_ch=3)
+        self.source_encoder = SourceEncoder(
+            in_ch=3,
+            pretrained=pretrained_source_encoder,
+            freeze_stages=freeze_source_stages,
+        )
         self.time_mlp = TimeMLP(time_dim)
 
         self.in_conv = nn.Conv2d(in_ch, model_ch, 3, padding=1)
@@ -231,9 +281,10 @@ class Img2ImgDiffusionUNet(nn.Module):
 
 
 if __name__ == "__main__":
-    model = Img2ImgDiffusionUNet()
+    model = Img2ImgDiffusionUNet(pretrained_source_encoder=True)
     s = torch.randn(2, 3, 128, 128)
     y_t = torch.randn(2, 3, 128, 128)
     t = torch.randint(0, 1000, (2,))
     out = model(s, y_t, t)
     print("output shape:", tuple(out.shape))
+    print("source encoder trainable:", model.source_encoder.trainable_summary())
