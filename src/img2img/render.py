@@ -50,3 +50,47 @@ def save_training_panel(source: torch.Tensor, target: torch.Tensor, noisy: torch
         y += row.height
     canvas.save(path)
 
+
+def save_inference_panel(source: torch.Tensor, output: torch.Tensor, path: str | Path, limit: int = 4):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    n = min(limit, source.shape[0])
+    for i in range(n):
+        imgs = [
+            _with_label(_tensor_to_pil(source[i]), "source"),
+            _with_label(_tensor_to_pil(output[i]), "sample"),
+        ]
+        width = sum(img.width for img in imgs)
+        height = max(img.height for img in imgs)
+        row = Image.new("RGB", (width, height), "#f5f5f5")
+        x = 0
+        for img in imgs:
+            row.paste(img, (x, 0))
+            x += img.width
+        rows.append(row)
+
+    width = max(r.width for r in rows)
+    height = sum(r.height for r in rows)
+    canvas = Image.new("RGB", (width, height), "white")
+    y = 0
+    for row in rows:
+        canvas.paste(row, (0, y))
+        y += row.height
+    canvas.save(path)
+
+
+def save_progress_strip(frames: list[torch.Tensor], path: str | Path, sample_idx: int = 0):
+    if not frames:
+        return
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    imgs = [_with_label(_tensor_to_pil(frame[sample_idx]), f"step_{i}") for i, frame in enumerate(frames)]
+    width = sum(img.width for img in imgs)
+    height = max(img.height for img in imgs)
+    canvas = Image.new("RGB", (width, height), "white")
+    x = 0
+    for img in imgs:
+        canvas.paste(img, (x, 0))
+        x += img.width
+    canvas.save(path)

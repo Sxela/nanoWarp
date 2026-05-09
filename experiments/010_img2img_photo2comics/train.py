@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from src.img2img import Img2ImgDiffusionUNet, PairedImageDataset
+from src.img2img import EMA, Img2ImgDiffusionUNet, PairedImageDataset
 from src.img2img.diffusion import DiffusionConfig, GaussianImageDiffusion
 from src.img2img.render import save_training_panel
 from src.toy_diffusion.render import save_loss_plot
@@ -23,6 +23,7 @@ def parse_args():
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--log-every", type=int, default=25)
     p.add_argument("--panel-every", type=int, default=100)
+    p.add_argument("--ema-decay", type=float, default=0.999)
     p.add_argument("--outdir", default="out/img2img_v1")
     p.add_argument("--no-pretrained", action="store_true")
     return p.parse_args()
@@ -45,6 +46,7 @@ def main():
     it = cycle(dl)
 
     model = Img2ImgDiffusionUNet(pretrained_source_encoder=not args.no_pretrained).to(device)
+    ema = EMA(model, decay=args.ema_decay)
     diffusion = GaussianImageDiffusion(DiffusionConfig(), device)
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
 
@@ -58,6 +60,7 @@ def main():
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
+        ema.update(model)
 
         losses.append(float(loss.item()))
         if step % args.log_every == 0 or step == 1:
@@ -69,6 +72,7 @@ def main():
     torch.save(
         {
             "model": model.state_dict(),
+            "ema_model": ema.model.state_dict(),
             "config": vars(args),
             "diffusion": diffusion.config.__dict__,
         },
@@ -81,4 +85,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
