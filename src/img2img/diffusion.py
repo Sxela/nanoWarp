@@ -50,6 +50,23 @@ class GaussianImageDiffusion:
         x0_hat = self.predict_x0_from_eps(x_t, t, eps_hat)
         return loss, t, x_t, noise, eps_hat, x0_hat
 
+    def make_sampling_schedule(self, sample_steps: int) -> list[int]:
+        sample_steps = max(1, min(sample_steps, self.config.timesteps))
+        if sample_steps == self.config.timesteps:
+            return list(reversed(range(self.config.timesteps)))
+        ts = torch.linspace(self.config.timesteps - 1, 0, sample_steps, device=self.device)
+        schedule = ts.round().long().tolist()
+        # dedupe while preserving order in case rounding collapses neighbors
+        deduped = []
+        seen = set()
+        for t in schedule:
+            if t not in seen:
+                deduped.append(int(t))
+                seen.add(int(t))
+        if deduped[-1] != 0:
+            deduped.append(0)
+        return deduped
+
     @torch.no_grad()
     def p_sample(self, model, source: torch.Tensor, x_t: torch.Tensor, t: torch.Tensor):
         eps_hat = model(source, x_t, t)
@@ -64,13 +81,49 @@ class GaussianImageDiffusion:
         return mean + torch.sqrt(beta) * noise
 
     @torch.no_grad()
-    def sample(self, model, source: torch.Tensor, image_size: int = 128, channels: int = 3, log_every: int | None = None):
+    def ddim_step(self, model, source: torch.Tensor, x_t: torch.Tensor, t: torch.Tensor, next_t: torch.Tensor):
+        eps_hat = model(source, x_t, t)
+        x0_hat = self.predict_x0_from_eps(x_t, t, eps_hat)
+
+        next_alpha_bar = torch.ones_like(t, dtype=torch.float32, device=self.device)
+        valid = next_t >= 0
+        if valid.any():
+            next_alpha_bar[valid] = self.alpha_bars[next_t[valid]]
+        next_alpha_bar = next_alpha_bar.view(-1, 1, 1, 1)
+
+        x_next = torch.sqrt(next_alpha_bar) * x0_hat + torch.sqrt(1.0 - next_alpha_bar) * eps_hat
+        return x_next.clamp(0.0, 1.0), x0_hat
+
+    @torch.no_grad()
+    def sample(
+        self,
+        model,
+        source: torch.Tensor,
+        image_size: int = 128,
+        channels: int = 3,
+        sample_steps: int | None = None,
+        log_every: int | None = None,
+    ):
         b = source.shape[0]
         x = torch.randn(b, channels, image_size, image_size, device=self.device)
         frames: list[torch.Tensor] = []
-        for i in reversed(range(self.config.timesteps)):
-            t = torch.full((b,), i, device=self.device, dtype=torch.long)
-            x = self.p_sample(model, source, x, t)
-            if log_every is not None and (i % log_every == 0 or i == self.config.timesteps - 1 or i == 0):
-                frames.append(x.detach().clamp(0, 1).cpu())
+        if sample_steps is None:
+            sample_steps = self.config.timesteps
+
+        if sample_steps >= self.config.timesteps:
+            for i in reversed(range(self.config.timesteps)):
+                t = torch.full((b,), i, device=self.device, dtype=torch.long)
+                x = self.p_sample(model, source, x, t)
+                if log_every is not None and (i % log_every == 0 or i == self.config.timesteps - 1 or i == 0):
+                    frames.append(x.detach().clamp(0, 1).cpu())
+            return x.clamp(0, 1), frames
+
+        schedule = self.make_sampling_schedule(sample_steps)
+        for idx, step_t in enumerate(schedule):
+            t = torch.full((b,), step_t, device=self.device, dtype=torch.long)
+            next_value = schedule[idx + 1] if idx + 1 < len(schedule) else -1
+            next_t = torch.full((b,), next_value, device=self.device, dtype=torch.long)
+            x, x0_hat = self.ddim_step(model, source, x, t, next_t)
+            if log_every is not None and (idx % log_every == 0 or idx == 0 or idx == len(schedule) - 1):
+                frames.append(x0_hat.detach().clamp(0, 1).cpu())
         return x.clamp(0, 1), frames
