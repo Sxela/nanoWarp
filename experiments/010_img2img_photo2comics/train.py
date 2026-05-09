@@ -41,6 +41,13 @@ def parse_args():
     p.add_argument("--outdir", default="out/img2img_v1")
     p.add_argument("--no-pretrained", action="store_true")
     p.add_argument("--source-in-stem", action="store_true")
+    p.add_argument("--no-source-encoder", action="store_true",
+                   help="Drop the ResNet18 source encoder + all FuseBlocks. Source enters via concat at the input "
+                        "stem only (forces --source-in-stem). Tests whether multiscale source conditioning is "
+                        "actually contributing on top of stem concat.")
+    p.add_argument("--model-ch", type=int, default=64,
+                   help="Base width of the UNet. All level widths are multiples (1x, 2x, 4x, 4x, 8x). "
+                        "Default 64 = original architecture (64/128/256/256/512). 96 = 1.5x wider.")
     p.add_argument("--freeze-source-encoder", choices=["none", "stem", "partial", "all"], default="partial",
                    help="Which ResNet stages of the source encoder to freeze. "
                         "stem=conv1+bn1; partial=stem+layer1 (current default); all=stem+layer1+layer2+layer3+layer4. "
@@ -125,12 +132,19 @@ def main():
     val_it = cycle(val_dl)
 
     freeze_stages = FREEZE_STAGE_PRESETS[args.freeze_source_encoder]
+    use_source_encoder = not args.no_source_encoder
     model = Img2ImgDiffusionUNet(
+        model_ch=args.model_ch,
         pretrained_source_encoder=not args.no_pretrained,
         freeze_source_stages=freeze_stages,
         source_in_stem=args.source_in_stem,
+        use_source_encoder=use_source_encoder,
     ).to(device)
+    print(f"use_source_encoder={use_source_encoder} model_ch={args.model_ch} unet_channels={model.unet_channels}")
     print(f"freeze_source_encoder={args.freeze_source_encoder} stages={freeze_stages}")
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"params total={total_params:,} trainable={trainable_params:,} frozen={total_params - trainable_params:,}")
     ema = EMA(model, decay=args.ema_decay)
     diffusion, method_cfg = build_method(args, device)
     print(f"method={args.method} method_cfg={method_cfg.__dict__}")

@@ -221,66 +221,93 @@ class Img2ImgDiffusionUNet(nn.Module):
         pretrained_source_encoder: bool = True,
         freeze_source_stages: tuple[str, ...] = ("stem", "layer1"),
         source_in_stem: bool = False,
+        use_source_encoder: bool = True,
     ):
         super().__init__()
+        if not use_source_encoder:
+            source_in_stem = True
+        self.use_source_encoder = use_source_encoder
         self.source_in_stem = source_in_stem
-        self.source_encoder = SourceEncoder(
-            in_ch=3,
-            pretrained=pretrained_source_encoder,
-            freeze_stages=freeze_source_stages,
-        )
+        if use_source_encoder:
+            self.source_encoder = SourceEncoder(
+                in_ch=3,
+                pretrained=pretrained_source_encoder,
+                freeze_stages=freeze_source_stages,
+            )
+        else:
+            self.source_encoder = None
         self.time_mlp = TimeMLP(time_dim)
 
+        # UNet widths are multiples of model_ch (base = 64 in the original design).
+        # Scaling model_ch scales the whole UNet by the same factor.
+        c1 = model_ch          # level 1 (full res)
+        c2 = model_ch * 2      # level 2
+        c3 = model_ch * 4      # level 3
+        c4 = model_ch * 4      # level 4
+        cm = model_ch * 8      # bottleneck
+        self.unet_channels = (c1, c2, c3, c4, cm)
+
         stem_in_ch = in_ch + 3 if source_in_stem else in_ch
-        self.in_conv = nn.Conv2d(stem_in_ch, model_ch, 3, padding=1)
+        self.in_conv = nn.Conv2d(stem_in_ch, c1, 3, padding=1)
 
-        self.down1 = ResBlock(model_ch, 64, time_dim * 4)
-        self.fuse1 = FuseBlock(64, 64)
-        self.ds1 = Downsample(64)
+        self.down1 = ResBlock(c1, c1, time_dim * 4)
+        self.ds1 = Downsample(c1)
 
-        self.down2 = ResBlock(64, 128, time_dim * 4)
-        self.fuse2 = FuseBlock(128, 64)
-        self.ds2 = Downsample(128)
+        self.down2 = ResBlock(c1, c2, time_dim * 4)
+        self.ds2 = Downsample(c2)
 
-        self.down3 = ResBlock(128, 256, time_dim * 4)
-        self.fuse3 = FuseBlock(256, 128)
-        self.ds3 = Downsample(256)
+        self.down3 = ResBlock(c2, c3, time_dim * 4)
+        self.ds3 = Downsample(c3)
 
-        self.down4 = ResBlock(256, 256, time_dim * 4)
-        self.fuse4 = FuseBlock(256, 256)
-        self.ds4 = Downsample(256)
+        self.down4 = ResBlock(c3, c4, time_dim * 4)
+        self.ds4 = Downsample(c4)
 
-        self.mid1 = ResBlock(256, 512, time_dim * 4)
-        self.mid_fuse = FuseBlock(512, 512)
-        self.mid_attn = BottleneckAttention(512)
-        self.mid2 = ResBlock(512, 512, time_dim * 4)
+        self.mid1 = ResBlock(c4, cm, time_dim * 4)
+        self.mid_attn = BottleneckAttention(cm)
+        self.mid2 = ResBlock(cm, cm, time_dim * 4)
 
-        self.up4 = Upsample(512)
-        self.dec4 = ResBlock(512 + 256, 256, time_dim * 4)
-        self.up3 = Upsample(256)
-        self.dec3 = ResBlock(256 + 256, 256, time_dim * 4)
-        self.up2 = Upsample(256)
-        self.dec2 = ResBlock(256 + 128, 128, time_dim * 4)
-        self.up1 = Upsample(128)
-        self.dec1 = ResBlock(128 + 64, 64, time_dim * 4)
+        if use_source_encoder:
+            # SourceEncoder (ResNet18) feature widths are fixed: 64, 64, 128, 256, 512.
+            self.fuse1 = FuseBlock(c1, 64)
+            self.fuse2 = FuseBlock(c2, 64)
+            self.fuse3 = FuseBlock(c3, 128)
+            self.fuse4 = FuseBlock(c4, 256)
+            self.mid_fuse = FuseBlock(cm, 512)
+        else:
+            self.fuse1 = self.fuse2 = self.fuse3 = self.fuse4 = self.mid_fuse = None
 
-        self.out_norm = nn.GroupNorm(8, 64)
-        self.out_conv = nn.Conv2d(64, out_ch, 3, padding=1)
+        self.up4 = Upsample(cm)
+        self.dec4 = ResBlock(cm + c4, c3, time_dim * 4)
+        self.up3 = Upsample(c3)
+        self.dec3 = ResBlock(c3 + c3, c3, time_dim * 4)
+        self.up2 = Upsample(c3)
+        self.dec2 = ResBlock(c3 + c2, c2, time_dim * 4)
+        self.up1 = Upsample(c2)
+        self.dec1 = ResBlock(c2 + c1, c1, time_dim * 4)
+
+        self.out_norm = nn.GroupNorm(8, c1)
+        self.out_conv = nn.Conv2d(c1, out_ch, 3, padding=1)
 
     def forward(self, source: torch.Tensor, noisy_target: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        src_feats = self.source_encoder(source)
         t_emb = self.time_mlp(t)
 
         stem_input = torch.cat([source, noisy_target], dim=1) if self.source_in_stem else noisy_target
         x0 = self.in_conv(stem_input)
 
-        h1 = self.fuse1(self.down1(x0, t_emb), src_feats[0])
-        h2 = self.fuse2(self.down2(self.ds1(h1), t_emb), src_feats[1])
-        h3 = self.fuse3(self.down3(self.ds2(h2), t_emb), src_feats[2])
-        h4 = self.fuse4(self.down4(self.ds3(h3), t_emb), src_feats[3])
-
-        mid = self.mid1(self.ds4(h4), t_emb)
-        mid = self.mid_fuse(mid, src_feats[4])
+        if self.use_source_encoder:
+            src_feats = self.source_encoder(source)
+            h1 = self.fuse1(self.down1(x0, t_emb), src_feats[0])
+            h2 = self.fuse2(self.down2(self.ds1(h1), t_emb), src_feats[1])
+            h3 = self.fuse3(self.down3(self.ds2(h2), t_emb), src_feats[2])
+            h4 = self.fuse4(self.down4(self.ds3(h3), t_emb), src_feats[3])
+            mid = self.mid1(self.ds4(h4), t_emb)
+            mid = self.mid_fuse(mid, src_feats[4])
+        else:
+            h1 = self.down1(x0, t_emb)
+            h2 = self.down2(self.ds1(h1), t_emb)
+            h3 = self.down3(self.ds2(h2), t_emb)
+            h4 = self.down4(self.ds3(h3), t_emb)
+            mid = self.mid1(self.ds4(h4), t_emb)
         mid = self.mid_attn(mid)
         mid = self.mid2(mid, t_emb)
 

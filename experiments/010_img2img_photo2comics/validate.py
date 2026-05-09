@@ -56,8 +56,10 @@ def main():
     ckpt = torch.load(args.checkpoint, map_location=device)
     train_cfg = ckpt.get("config", {})
     model = Img2ImgDiffusionUNet(
+        model_ch=train_cfg.get("model_ch", 64),
         pretrained_source_encoder=False,
         source_in_stem=train_cfg.get("source_in_stem", False),
+        use_source_encoder=not train_cfg.get("no_source_encoder", False),
     ).to(device)
     state_key = "ema_model" if args.use_ema and "ema_model" in ckpt else "model"
     model.load_state_dict(ckpt[state_key])
