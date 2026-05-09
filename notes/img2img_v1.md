@@ -28,8 +28,13 @@ So the model learns:
 ## Architecture
 
 ### Source branch
-A small ResNet18-like encoder extracts multiscale structure features from the input photo.
+A small **ImageNet-pretrained ResNet18-compatible encoder** extracts multiscale structure features from the input photo.
 These features act as the conditioning signal.
+
+Default plan:
+- use pretrained ResNet18 weights
+- freeze `stem` and `layer1` first
+- leave `layer2-4` trainable by default
 
 ### Diffusion branch
 A compact UNet denoises the noisy comic target.
