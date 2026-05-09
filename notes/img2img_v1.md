@@ -70,6 +70,33 @@ We are explicitly avoiding a large VAE-first setup because:
 - do we want plain epsilon prediction only, or add an x0 reconstruction preview/logging path?
 - paired data first, or pseudo-paired synthetic comic transforms first?
 
+## Dataset / augmentation plan
+
+Use a paired dataset with filename-matched `source/` and `target/` folders.
+
+Augmentations should be split into two groups:
+
+### Shared structural augmentations (apply to both source and target)
+- resize
+- crop
+- horizontal flip
+- small rotation
+- small scale / translation jitter
+
+These preserve correspondence.
+
+### Source-only appearance augmentations
+- brightness
+- contrast
+- saturation
+- small hue jitter
+- gamma
+- mild blur / compression-like degradation later if useful
+
+These should encourage the model to map varied photo appearance into a stable target comic style.
+
+The dataset layer should always support a visual debug mode so alignment bugs are obvious early.
+
 ## Intended next step
 
 Turn this note into:
