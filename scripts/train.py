@@ -10,11 +10,12 @@ from pathlib import Path
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("stage", choices=["toy2d"])
+    p.add_argument("stage", choices=["toy2d", "img2img-v1"])
     args, rest = p.parse_known_args()
 
     stage_file = {
         "toy2d": Path(__file__).resolve().parents[1] / "experiments" / "000_toy_2d" / "train.py",
+        "img2img-v1": Path(__file__).resolve().parents[1] / "experiments" / "010_img2img_photo2comics" / "train.py",
     }[args.stage]
 
     repo_root = Path(__file__).resolve().parents[1]
