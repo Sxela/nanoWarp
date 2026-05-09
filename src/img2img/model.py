@@ -76,10 +76,17 @@ class SourceEncoder(nn.Module):
         self.layer3 = nn.Sequential(BasicBlock(128, 256, stride=2), BasicBlock(256, 256))
         self.layer4 = nn.Sequential(BasicBlock(256, 512, stride=2), BasicBlock(512, 512))
 
+        self._frozen_stage_names: tuple[str, ...] = tuple(freeze_stages) if freeze_stages else ()
+
         if pretrained:
             self.load_pretrained_weights()
         if freeze_stages:
             self.freeze_stages(freeze_stages)
+
+    def _stage_modules(self, stage: str):
+        if stage == "stem":
+            return [self.conv1, self.bn1]
+        return [getattr(self, stage)]
 
     def load_pretrained_weights(self):
         try:
@@ -93,14 +100,19 @@ class SourceEncoder(nn.Module):
             warnings.warn(f"Falling back to random SourceEncoder init; failed to load ResNet18 weights: {e}")
 
     def freeze_stages(self, stages: tuple[str, ...] = ("stem", "layer1")):
+        self._frozen_stage_names = tuple(stages)
         for stage in stages:
-            if stage == "stem":
-                modules = [self.conv1, self.bn1]
-            else:
-                modules = [getattr(self, stage)]
-            for module in modules:
+            for module in self._stage_modules(stage):
                 for param in module.parameters():
                     param.requires_grad = False
+                module.eval()
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        for stage in self._frozen_stage_names:
+            for module in self._stage_modules(stage):
+                module.eval()
+        return self
 
     def trainable_summary(self) -> dict[str, bool]:
         return {

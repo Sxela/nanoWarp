@@ -8,8 +8,19 @@ from torch.utils.data import DataLoader
 
 from src.img2img import Img2ImgDiffusionUNet, PairedImageDataset
 from src.img2img.diffusion import DiffusionConfig, GaussianImageDiffusion
+from src.img2img.flow import FlowConfig, RectifiedImageFlow
 from src.img2img.render import save_inference_panel, save_progress_strip
 from src.utils.config import apply_yaml_config
+
+
+def build_method_from_ckpt(ckpt: dict, device: torch.device):
+    method = ckpt.get("method", "diffusion")
+    cfg_dict = ckpt.get("diffusion", {})
+    if method == "flow":
+        cfg = FlowConfig(**cfg_dict)
+        return RectifiedImageFlow(cfg, device), cfg, method
+    cfg = DiffusionConfig(**cfg_dict)
+    return GaussianImageDiffusion(cfg, device), cfg, method
 
 
 def parse_args():
@@ -44,8 +55,8 @@ def main():
     model.load_state_dict(ckpt[state_key])
     model.eval()
 
-    diffusion_cfg = DiffusionConfig(**ckpt.get("diffusion", {}))
-    diffusion = GaussianImageDiffusion(diffusion_cfg, device)
+    diffusion, method_cfg, method = build_method_from_ckpt(ckpt, device)
+    print(f"loaded method={method} method_cfg={method_cfg.__dict__}")
 
     ds = PairedImageDataset(args.data_root)
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)

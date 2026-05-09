@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import torch
@@ -10,7 +11,8 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from src.img2img import EMA, Img2ImgDiffusionUNet, build_train_val_datasets
 from src.img2img.diffusion import DiffusionConfig, GaussianImageDiffusion
-from src.img2img.render import save_training_panel
+from src.img2img.flow import FlowConfig, RectifiedImageFlow
+from src.img2img.render import save_val_panel
 from src.toy_diffusion.render import save_loss_plot
 from src.utils.config import apply_yaml_config
 
@@ -26,6 +28,10 @@ def parse_args():
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--steps", type=int, default=2000)
     p.add_argument("--lr", type=float, default=2e-4)
+    p.add_argument("--lr-min", type=float, default=0.0)
+    p.add_argument("--lr-warmup-steps", type=int, default=0)
+    p.add_argument("--lr-cosine", action="store_true")
+    p.add_argument("--grad-clip-norm", type=float, default=0.0)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--log-every", type=int, default=25)
     p.add_argument("--panel-every", type=int, default=100)
@@ -35,14 +41,69 @@ def parse_args():
     p.add_argument("--outdir", default="out/img2img_v1")
     p.add_argument("--no-pretrained", action="store_true")
     p.add_argument("--source-in-stem", action="store_true")
+    p.add_argument("--freeze-source-encoder", choices=["none", "stem", "partial", "all"], default="partial",
+                   help="Which ResNet stages of the source encoder to freeze. "
+                        "stem=conv1+bn1; partial=stem+layer1 (current default); all=stem+layer1+layer2+layer3+layer4. "
+                        "Frozen stages also have their BN running stats locked (eval mode).")
     p.add_argument("--lpips-weight", type=float, default=0.0)
+    p.add_argument("--prediction-type", choices=["eps", "v"], default="eps",
+                   help="Diffusion only. Ignored when --method flow.")
+    p.add_argument("--source-dropout", type=float, default=0.0)
+    p.add_argument("--high-t-warmup-steps", type=int, default=0,
+                   help="Initial steps where t is sampled from [high_t_warmup_low, timesteps). "
+                        "For diffusion this is the hard regime (lots of noise). "
+                        "For flow matching the analogous hard regime is t near 0; the flag is honored "
+                        "as-is and translates to the same integer-timestep range.")
+    p.add_argument("--high-t-warmup-low", type=int, default=500)
+    p.add_argument("--method", choices=["diffusion", "flow"], default="diffusion",
+                   help="diffusion = GaussianImageDiffusion (eps or v). flow = direct img2img rectified flow matching.")
+    p.add_argument("--flow-sigma-noise", type=float, default=0.0,
+                   help="Flow only. Optional Gaussian noise added to the interpolant for off-path regularization.")
+    p.add_argument("--sample-panel-steps", type=int, default=20,
+                   help="Number of reverse-sampling steps used when rendering training panels. "
+                        "Diffusion: DDIM stride; Flow: Euler steps. Bumps panel cost by ~steps forwards.")
+    p.add_argument("--checkpoint-every", type=int, default=0,
+                   help="If >0, save model.pt every N steps (in addition to the final save). "
+                        "Lets validate.py run mid-training in a parallel process.")
     return p.parse_args()
+
+
+def build_method(args, device):
+    if args.method == "flow":
+        cfg = FlowConfig(sigma_noise=args.flow_sigma_noise)
+        return RectifiedImageFlow(cfg, device), cfg
+    cfg = DiffusionConfig(prediction_type=args.prediction_type)
+    return GaussianImageDiffusion(cfg, device), cfg
+
+
+FREEZE_STAGE_PRESETS: dict[str, tuple[str, ...]] = {
+    "none": (),
+    "stem": ("stem",),
+    "partial": ("stem", "layer1"),
+    "all": ("stem", "layer1", "layer2", "layer3", "layer4"),
+}
 
 
 def cycle(dl):
     while True:
         for batch in dl:
             yield batch
+
+
+def lr_at(step: int, args, total_steps: int) -> float:
+    if args.lr_warmup_steps > 0 and step <= args.lr_warmup_steps:
+        return args.lr * (step / max(1, args.lr_warmup_steps))
+    if args.lr_cosine and total_steps > args.lr_warmup_steps:
+        progress = (step - args.lr_warmup_steps) / max(1, total_steps - args.lr_warmup_steps)
+        progress = max(0.0, min(1.0, progress))
+        return args.lr_min + (args.lr - args.lr_min) * 0.5 * (1.0 + math.cos(math.pi * progress))
+    return args.lr
+
+
+def t_range_at(step: int, args, timesteps: int) -> tuple[int, int]:
+    if args.high_t_warmup_steps > 0 and step <= args.high_t_warmup_steps:
+        return max(0, min(args.high_t_warmup_low, timesteps - 1)), timesteps
+    return 0, timesteps
 
 
 def main():
@@ -63,12 +124,16 @@ def main():
     it = cycle(dl)
     val_it = cycle(val_dl)
 
+    freeze_stages = FREEZE_STAGE_PRESETS[args.freeze_source_encoder]
     model = Img2ImgDiffusionUNet(
         pretrained_source_encoder=not args.no_pretrained,
+        freeze_source_stages=freeze_stages,
         source_in_stem=args.source_in_stem,
     ).to(device)
+    print(f"freeze_source_encoder={args.freeze_source_encoder} stages={freeze_stages}")
     ema = EMA(model, decay=args.ema_decay)
-    diffusion = GaussianImageDiffusion(DiffusionConfig(), device)
+    diffusion, method_cfg = build_method(args, device)
+    print(f"method={args.method} method_cfg={method_cfg.__dict__}")
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
     aux_lpips = None
     if args.lpips_weight > 0:
@@ -76,31 +141,65 @@ def main():
 
     losses: list[float] = []
     val_history: list[float] = []
+    grad_norms: list[float] = []
     for step in range(1, args.steps + 1):
+        cur_lr = lr_at(step, args, args.steps)
+        for g in opt.param_groups:
+            g["lr"] = cur_lr
+
+        t_low, t_high = t_range_at(step, args, method_cfg.timesteps)
+
         batch = next(it)
         source = batch["source"].to(device)
         target = batch["target"].to(device)
-        loss, t, x_t, _noise, _eps_hat, x0_hat, diffusion_loss, lpips_loss = diffusion.training_loss(
+        loss, t, x_t, _noise, _model_out, x0_hat, diffusion_loss, lpips_loss = diffusion.training_loss(
             model,
             source,
             target,
             aux_lpips=aux_lpips,
             aux_lpips_weight=args.lpips_weight,
+            t_low=t_low,
+            t_high=t_high,
+            source_dropout=args.source_dropout,
         )
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
+        if args.grad_clip_norm > 0:
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                [p for p in model.parameters() if p.requires_grad], max_norm=args.grad_clip_norm
+            )
+            grad_norms.append(float(grad_norm))
         opt.step()
         ema.update(model)
 
         losses.append(float(loss.item()))
         if step % args.log_every == 0 or step == 1:
+            extra = f" | grad_norm {grad_norms[-1]:.4f}" if grad_norms else ""
             print(
-                f"step {step:5d} | loss {loss.item():.6f} | diffusion {float(diffusion_loss):.6f} | lpips {float(lpips_loss):.6f}"
+                f"step {step:5d} | lr {cur_lr:.6f} | t in [{t_low},{t_high}) | "
+                f"loss {loss.item():.6f} | diffusion {float(diffusion_loss):.6f} | lpips {float(lpips_loss):.6f}{extra}"
             )
             save_loss_plot(losses, outdir / "loss.png")
         if step % args.panel_every == 0 or step == args.steps:
-            save_training_panel(source, target, x_t.clamp(0, 1), x0_hat, outdir / f"panel_step_{step:06d}.png")
+            model.eval()
+            with torch.no_grad():
+                samples_panel, _ = diffusion.sample(
+                    model,
+                    source,
+                    image_size=args.image_size,
+                    sample_steps=args.sample_panel_steps,
+                    log_every=None,
+                )
+            model.train()
+            save_val_panel(
+                source,
+                target,
+                samples_panel,
+                x0_hat,
+                outdir / f"panel_step_{step:06d}.png",
+                high_t_label="x0_hat_random_t",
+            )
         if step % args.val_every == 0 or step == args.steps:
             val_losses = []
             for _ in range(args.val_batches):
@@ -113,12 +212,27 @@ def main():
             val_history.append(mean_val)
             print(f"val step {step:5d} | mean_loss {mean_val:.6f}")
 
+        if args.checkpoint_every > 0 and step % args.checkpoint_every == 0 and step != args.steps:
+            torch.save(
+                {
+                    "model": model.state_dict(),
+                    "ema_model": ema.model.state_dict(),
+                    "config": vars(args),
+                    "diffusion": method_cfg.__dict__,
+                    "method": args.method,
+                    "step": step,
+                },
+                outdir / f"model_step_{step:06d}.pt",
+            )
+            print(f"saved intermediate checkpoint at step {step}")
+
     torch.save(
         {
             "model": model.state_dict(),
             "ema_model": ema.model.state_dict(),
             "config": vars(args),
-            "diffusion": diffusion.config.__dict__,
+            "diffusion": method_cfg.__dict__,
+            "method": args.method,
         },
         outdir / "model.pt",
     )
@@ -127,6 +241,7 @@ def main():
             "final_loss": losses[-1],
             "mean_loss_last_50": sum(losses[-50:]) / min(50, len(losses)),
             "last_val_loss": val_history[-1] if val_history else None,
+            "mean_grad_norm_last_50": (sum(grad_norms[-50:]) / min(50, len(grad_norms))) if grad_norms else None,
         }, f, indent=2)
     print(f"saved checkpoint to {outdir / 'model.pt'}")
 

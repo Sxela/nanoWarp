@@ -1,0 +1,219 @@
+# Captain's log — img2img photo→anime
+
+A chronological record of experiments run, with the exact command used for each.
+Findings and reasoning live in [findings_2026-05-09.md](findings_2026-05-09.md);
+this file is the lab notebook.
+
+Dataset preparation was a one-time step:
+
+```powershell
+python scripts/prepare_photo2anime.py
+# 337 paired files in anime_ds → data/photo2anime/{train,val}/{source,target}
+# 287 train, 50 val, deterministic tail-50-by-index split
+```
+
+All commands below assume `.venv` is active and the environment is set with
+`$env:PYTHONPATH = ".\nanoWarp"`.
+
+---
+
+## 2026-05-09
+
+### exp01 — baseline (eps diffusion, partial freeze, 2k steps)
+
+Reproduces docs/first_experiments.md step 1.
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --config configs/photo2comics_baseline.yaml `
+    --outdir out/exp01_baseline
+```
+
+- 2000 steps, bs=4, 128px, lr=2e-4, EMA 0.999, ε prediction.
+- Final loss ~0.057, val mean_loss ~0.012.
+- Visually clean train-time x0_hat panels — but full DDIM-50 inference output was
+  washed grey scribbles. Triggered the realization that train-time x0_hat at
+  random t is not the same as full reverse sampling.
+
+Validation (later replaced by the rewritten validate.py):
+
+```powershell
+python scripts/sample.py img2img-v1-val data/photo2anime `
+    --config configs/photo2comics_baseline.yaml `
+    --checkpoint out/exp01_baseline/model.pt --use-ema `
+    --outdir out/exp01_baseline_val
+```
+
+Sampler/clamp investigation runs on the same exp01 EMA checkpoint:
+
+```powershell
+python scripts/sample.py img2img-v1-infer data/photo2anime/val `
+    --config configs/photo2comics_baseline.yaml `
+    --checkpoint out/exp01_baseline/model.pt --use-ema --sample-steps 5  `
+    --outdir out/exp01_infer05
+python scripts/sample.py img2img-v1-infer data/photo2anime/val `
+    --config configs/photo2comics_baseline.yaml `
+    --checkpoint out/exp01_baseline/model.pt --use-ema --sample-steps 20 `
+    --outdir out/exp01_infer20
+python scripts/sample.py img2img-v1-infer data/photo2anime/val `
+    --config configs/photo2comics_baseline.yaml `
+    --checkpoint out/exp01_baseline/model.pt --use-ema --sample-steps 50 `
+    --outdir out/exp01_infer50
+python scripts/sample.py img2img-v1-infer data/photo2anime/val `
+    --config configs/photo2comics_baseline.yaml `
+    --checkpoint out/exp01_baseline/model.pt --use-ema --sample-steps 999 `
+    --outdir out/exp01_infer999_ddim_clamp
+python scripts/sample.py img2img-v1-infer data/photo2anime/val `
+    --config configs/photo2comics_baseline.yaml `
+    --checkpoint out/exp01_baseline/model.pt --use-ema --sample-steps 1000 `
+    --outdir out/exp01_infer1000_ddpm
+```
+
+All flavors (DDIM 5/20/50, DDIM 999 with clamp, full DDPM 1000) failed in
+different ways. Concluded the issue was the **model**, not the sampler.
+
+After rewriting validate.py to do full reverse sampling + high-t diagnostic:
+
+```powershell
+python scripts/sample.py img2img-v1-val data/photo2anime `
+    --config configs/photo2comics_baseline.yaml `
+    --checkpoint out/exp01_baseline/model.pt --use-ema --sample-steps 50 `
+    --max-batches 4 --panel-count 2 --save-progress-strip `
+    --outdir out/exp01_baseline_val_v2
+```
+
+Result: `mean_loss=0.0095, mean_ssim_sampled=0.353, mean_lpips_sampled=0.533`.
+The high-t diagnostic column showed pure colored static — confirmed source
+conditioning collapses at high t.
+
+### exp02 — source-in-stem (2k steps)
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --config configs/photo2comics_baseline.yaml --source-in-stem `
+    --outdir out/exp02_source_in_stem
+```
+
+- Loss 0.026 (better than exp01 0.031), but SSIM 0.230 (worse) and LPIPS 0.689 (worse).
+- Source-in-stem helps the random-t reconstruction loss but hurts structural
+  similarity at this scale.
+
+### exp03 — LPIPS aux loss 0.1 (2k steps)
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --config configs/photo2comics_baseline.yaml --lpips-weight 0.1 `
+    --outdir out/exp03_lpips_01
+```
+
+- LPIPS aux dropped from 0.87 → ~0.35 over the run. Did not validate further;
+  pivoted to longer baselines after this.
+
+### exp05 — long baseline (20k steps, no safety nets) — KILLED
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --config configs/photo2comics_baseline.yaml `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 `
+    --outdir out/exp05_long_baseline_20k
+```
+
+- Diverged sharply at ~step 5000–6000. Loss floor jumped from ~0.02 to ~0.15
+  and stayed elevated. Visible in panels: x0_hat clean through step 4k, grainy
+  from step 5k+. Killed at step ~7000.
+
+### exp06 — same run + every safety net we had (20k steps) — KILLED
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --config configs/photo2comics_baseline.yaml `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --prediction-type v --source-dropout 0.15 `
+    --high-t-warmup-steps 2000 --high-t-warmup-low 500 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --outdir out/exp06_vpred_dropout_warmup_20k
+```
+
+- Stack: v-prediction + source dropout 0.15 + high-t warmup 2k + grad clip 1.0
+  + LR warmup 500 + cosine decay to 1e-5.
+- **Collapsed at the same step ~5000–6000** as exp05. Optimizer hygiene did
+  not save it. Killed.
+- This was the data point that pinned the cause on the trainable ResNet
+  encoder layers (layer2/3/4 drift), not the optimizer.
+
+### exp07 — flow matching + freeze=all + safety nets (20k steps) — KILLED EARLY
+
+After adding `--method flow`, `--freeze-source-encoder all`, and the `eval()`
+override on frozen stages:
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --freeze-source-encoder all --source-dropout 0.15 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --outdir out/exp07_flow_freeze_all_20k
+```
+
+- **Cleared step 5000 with no collapse.** Loss curve is a tight clean decay,
+  no vertical jump. Confirmed the freeze hypothesis.
+- Visually at step 5000, predicted-target panels showed recognizable anime
+  stylization — qualitatively far above any diffusion run.
+- Killed at step ~6000 only because we wanted to restart with intermediate
+  checkpoint saving (the running process didn't have it).
+
+### exp07b — same as exp07 but with mid-run checkpoints + full-sample panels (20k steps) — RUNNING
+
+After adding `--checkpoint-every` and replacing the random-t panel with a
+full-sample panel:
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --freeze-source-encoder all --source-dropout 0.15 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --checkpoint-every 1000 --sample-panel-steps 20 `
+    --outdir out/exp07b_flow_chkpt_20k
+```
+
+Mid-run validations (run in parallel as checkpoints land):
+
+```powershell
+python scripts/sample.py img2img-v1-val data/photo2anime `
+    --checkpoint out/exp07b_flow_chkpt_20k/model_step_001000.pt --use-ema `
+    --sample-steps 20 --max-batches 4 --panel-count 2 `
+    --outdir out/exp07b_val_step_001000
+
+# step-5000 watcher armed; will fire automatically when that checkpoint lands.
+```
+
+Step-1k val: `mean_lpips_sampled=0.219, mean_ssim_sampled=0.616`. Already
+substantially above any diffusion run, but caveat: at step 1k the model's
+output is mostly source-with-mild-color-shift, not real anime stylization yet
+— the metrics partly reflect source≈target structural similarity.
+
+Through step 4k (latest panel at the time of writing), output remains
+"source plus a touch of palette/contrast shift." No flat-color regions, no
+ink lines yet. Real anime stylization presumably needs many more steps of
+training given the 287-pair dataset.
+
+Final validation (when training finishes):
+
+```powershell
+python scripts/sample.py img2img-v1-val data/photo2anime `
+    --checkpoint out/exp07b_flow_chkpt_20k/model.pt --use-ema `
+    --sample-steps 20 --max-batches 13 --panel-count 4 --save-progress-strip `
+    --outdir out/exp07b_val_final
+```
+
+---
+
+## Open follow-ups (after exp07b lands)
+
+- Compute "source-as-prediction" baseline SSIM/LPIPS to know the floor any
+  conditional model has to beat. Five-line script.
+- Replace `save_loss_plot` with log-y + rolling mean.
+- exp08 ablation: drop the source encoder entirely, use `--source-in-stem` +
+  smaller UNet, see if frozen-ResNet conditioning was actually contributing.
+- Latent flow matching once the pixel-space pipeline is producing clean output.
