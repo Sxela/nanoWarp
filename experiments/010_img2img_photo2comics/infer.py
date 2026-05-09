@@ -19,7 +19,8 @@ def parse_args():
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--outdir", default="out/img2img_v1_infer")
     p.add_argument("--use-ema", action="store_true")
-    p.add_argument("--progress-every", type=int, default=100)
+    p.add_argument("--sample-steps", type=int, default=50)
+    p.add_argument("--progress-every", type=int, default=5)
     p.add_argument("--limit-batches", type=int, default=1)
     return p.parse_args()
 
@@ -49,12 +50,17 @@ def main():
         if batch_idx >= args.limit_batches:
             break
         source = batch["source"].to(device)
-        samples, frames = diffusion.sample(model, source, image_size=image_size, log_every=args.progress_every)
+        samples, frames = diffusion.sample(
+            model,
+            source,
+            image_size=image_size,
+            sample_steps=args.sample_steps,
+            log_every=args.progress_every,
+        )
         save_inference_panel(source, samples, outdir / f"infer_panel_{batch_idx:03d}.png")
         save_progress_strip(frames, outdir / f"infer_progress_{batch_idx:03d}.png")
-        print(f"saved inference artifacts for batch {batch_idx} to {outdir}")
+        print(f"saved inference artifacts for batch {batch_idx} to {outdir} using {args.sample_steps} sampling steps")
 
 
 if __name__ == "__main__":
     main()
-
