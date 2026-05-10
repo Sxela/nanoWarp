@@ -461,8 +461,23 @@ were not logged to wandb. From exp08 onward, runs will land in the
 
 ## Open follow-ups
 
-- Compute "source-as-prediction" baseline SSIM/LPIPS to know the floor any
-  conditional model has to beat. Five-line script.
+- ~~Compute "source-as-prediction" baseline SSIM/LPIPS to know the floor any
+  conditional model has to beat. Five-line script.~~ **Done 2026-05-10.**
+  Floor: SSIM 0.617 / LPIPS 0.199 on val. Best model is 0.740 / 0.153.
+
+- **Rename `FlowConfig.timesteps`** → `time_embedding_scale` or similar.
+  Currently `timesteps=1000` in the flow config is misleading because FM
+  has no discretized timestep schedule — `t` is continuous in [0,1] and we
+  multiply by 999 only to feed into the existing sinusoidal `TimeMLP`
+  (which was originally designed for diffusion's integer timesteps).
+  Could be 100 or 10000 with no functional difference. Cleanup-only;
+  touches saved checkpoint configs so do once, carefully.
+
+- **Best-checkpoint selection (val-LPIPS early stopping).** exp10 showed
+  that LPIPS can regress past the optimum step while SSIM/MSE keep
+  improving. A trainer hook that re-validates every checkpoint and saves
+  `best_lpips.pt` would automate finding the optimum. ~30 lines, runs val
+  in a separate stream so it doesn't block training.
 - Replace `save_loss_plot` with log-y + rolling mean (now optional since
   wandb handles smoothing).
 - ~~Trainer `--resume` support to continue from a saved checkpoint.~~
@@ -532,7 +547,7 @@ What this tells us:
 (`--upsample-type pixel_shuffle`) for future tasks where the trade-off may
 flip (e.g. higher resolution, no aux loss).
 
-### exp10 — multi-scale attention + bf16 on top of exp08-noenc — RUNNING (step 20k/30k snapshot validated)
+### exp10 — multi-scale attention + bf16 on top of exp08-noenc — DONE
 
 Hypothesis: multi-scale self-attention can replace the perceptual priors that
 exp08-noenc lost when we dropped the ImageNet encoder. If true, we get a
@@ -609,12 +624,8 @@ Comparison table to fill in once results land:
 
 | step | exp08-noenc SSIM | exp10 SSIM | exp08-noenc LPIPS | exp10 LPIPS |
 |---:|---:|---:|---:|---:|
-|  1k |  |  |  |  |
-|  5k |  |  |  |  |
-| 10k |  |  |  |  |
-| 15k |  |  |  |  |
 | **20k** | **0.734** | **0.736** | **0.159** | **0.153** |
-| 30k | — | (in progress) | — | (in progress) |
+| **30k** | **—** | **0.740** | **—** | **0.158** |
 
 **Step-20k snapshot — Scenario A confirmed.**
 
@@ -641,8 +652,27 @@ a smaller, simpler, encoder-free architecture going forward. Visual
 panels at step 20k show recognizable anime stylization comparable to
 exp08-lpips.
 
-This is at step 20k of 30k; the final number could push exp10 past
-exp08-lpips on both metrics rather than just match.
+**Step-30k final:**
+
+| | exp08-lpips 20k | exp10 best (step 20k) | exp10 final (step 30k) |
+|---|---:|---:|---:|
+| SSIM ↑ | 0.719 | 0.736 | **0.740** (best) |
+| LPIPS ↓ | **0.152** (best) | 0.153 | 0.158 |
+
+**LPIPS regressed slightly between 20k and 30k** (0.153 → 0.158) while
+SSIM kept improving. So **the optimal stopping for exp10 was ~20k**, not
+30k. Likely causes: LPIPS aux signal saturated at weight 0.2 so further
+training optimizes MSE/SSIM at the expense of perceptual; train-val gap
+creep on the small (287-pair) dataset; cosine LR floor (1e-5) oscillation
+in a flat minimum.
+
+**Final reading**: exp10 (step 20k checkpoint) **matches exp08-lpips on
+LPIPS and beats it by +2% on SSIM**, with **no encoder dependency** and
+~25% smaller architecture than exp08-lpips's encoder+UNet. Architectural
+win confirmed.
+
+For exp11 onward: either cap at 20k–25k steps, or train to 30k but pick
+the EMA checkpoint with best val LPIPS (we have all 1k–29k checkpoints).
 
 ### exp11 — exp10 + linear RGB — PLANNED (Scenario A activated)
 
