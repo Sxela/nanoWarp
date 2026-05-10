@@ -1149,6 +1149,24 @@ implement exp16 (GAN aux). Otherwise, exp14 is plausibly the
 
 ---
 
+## Known bugs / lessons
+
+- **2026-05-10 bug: LPIPS aux silently disabled when FeatureLoss flags
+  weren't set.** Introduced during the FeatureLoss wiring. The
+  `aux_lpips = raw_lpips` assignment got scoped into the feature-loss
+  block, so `--lpips-weight 0.2` alone produced `aux_lpips=None` and
+  `lpips_loss = 0.0` for the entire run. The reported training-log
+  `lpips` column showed exactly 0, which was the clue.
+  Effect: first exp14 launch trained as "FM only, no perceptual aux" —
+  the slow-convergence regime characterised in exp07b.
+  Fix: re-scoped the lpips wrapper construction inside `if args.lpips_weight > 0:`.
+  **Lesson**: smoke tests must cover each flag *in isolation*, not just
+  the "all flags on" path. Going forward, when adding any new aux loss,
+  always test:
+  1. Old flag only (e.g. `--lpips-weight 0.2`).
+  2. New flag only (e.g. `--feature-content-weight 1.0 --feature-style-weight 5000`).
+  3. Both together.
+
 ## Open follow-ups
 
 - ~~Compute "source-as-prediction" baseline SSIM/LPIPS.~~ **Done 2026-05-10.**

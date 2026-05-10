@@ -277,7 +277,17 @@ def main():
     aux_lpips = None
     if args.lpips_weight > 0:
         raw_lpips = LearnedPerceptualImagePatchSimilarity(net_type=args.lpips_aux_net, normalize=True).to(device)
-        print(f"lpips_aux_net={args.lpips_aux_net} (val metric stays on squeeze for continuity)")
+        if args.color_space == "linear_rgb":
+            class _LpipsLinearWrapper(torch.nn.Module):
+                def __init__(self, inner):
+                    super().__init__()
+                    self.inner = inner
+                def forward(self, a, b):
+                    return self.inner(linear_to_srgb(a).clamp(0, 1), linear_to_srgb(b).clamp(0, 1))
+            aux_lpips = _LpipsLinearWrapper(raw_lpips)
+        else:
+            aux_lpips = raw_lpips
+        print(f"lpips_aux_net={args.lpips_aux_net} weight={args.lpips_weight} (val metric stays on squeeze for continuity)")
 
     feature_loss_fn = None
     if args.feature_content_weight > 0 or args.feature_style_weight > 0:
@@ -291,16 +301,6 @@ def main():
             f"feature_loss layers={feat_layers} "
             f"content_w={args.feature_content_weight} style_w={args.feature_style_weight}"
         )
-        if args.color_space == "linear_rgb":
-            class _LpipsLinearWrapper(torch.nn.Module):
-                def __init__(self, inner):
-                    super().__init__()
-                    self.inner = inner
-                def forward(self, a, b):
-                    return self.inner(linear_to_srgb(a).clamp(0, 1), linear_to_srgb(b).clamp(0, 1))
-            aux_lpips = _LpipsLinearWrapper(raw_lpips)
-        else:
-            aux_lpips = raw_lpips
 
     start_step = 1
     if args.resume:
