@@ -387,10 +387,24 @@ external pretraining. Generalization gap is data-bound either way.
 What you'd score on val/train if you literally output the source photo as
 the predicted target. Any conditional model has to beat this.
 
-| split | SSIM ↑ | LPIPS ↓ |
-|---|---:|---:|
-| train (287 pairs) | 0.6096 | 0.1976 |
-| val (50 pairs) | 0.6168 | 0.1987 |
+| split | SSIM ↑ | LPIPS ↓ | image size |
+|---|---:|---:|---:|
+| train (287 pairs) | 0.6096 | 0.1976 | 128px |
+| val (50 pairs) | 0.6168 | 0.1987 | 128px |
+| train (287 pairs) | 0.5474 | 0.2972 | **256px** |
+| val (50 pairs) | 0.5571 | 0.2993 | **256px** |
+
+**Important calibration**: metric scales with image size. At 256px the
+LPIPS floor is **~50% higher** than at 128px (0.299 vs 0.199), because
+LPIPS gets more spatial bandwidth to penalise pair differences. Conversely
+SSIM floor drops ~10%. Comparing absolute LPIPS values across resolutions
+is misleading — compare *relative gap to floor*:
+
+- 128px exp10 best: LPIPS 0.153 / floor 0.199 → **24% below floor** (gap 0.047)
+- For an exp12 result to match in *relative* terms it'd need LPIPS ≈ 0.227
+  at 256px (24% below 0.299). Anything substantially better than that is a
+  real win at higher resolution; anything around 0.25-0.28 is roughly the
+  same architectural ceiling we hit at 128px.
 
 Reframed model performance as relative improvement over the floor:
 
