@@ -98,6 +98,11 @@ def parse_args():
                         "stem=conv1+bn1; partial=stem+layer1 (current default); all=stem+layer1+layer2+layer3+layer4. "
                         "Frozen stages also have their BN running stats locked (eval mode).")
     p.add_argument("--lpips-weight", type=float, default=0.0)
+    p.add_argument("--lpips-aux-net", choices=["squeeze", "alex", "vgg"], default="squeeze",
+                   help="Backbone for the LPIPS auxiliary loss. squeeze=~0.7M params (fastest, default), "
+                        "alex=~5M, vgg=~14M (best for style/texture per Gatys/Johnson literature). "
+                        "VGG adds ~10ms/step at bs=4 128px. Validation metric stays on SqueezeNet for "
+                        "continuity with exp01-exp11.")
     p.add_argument("--prediction-type", choices=["eps", "v"], default="eps",
                    help="Diffusion only. Ignored when --method flow.")
     p.add_argument("--source-dropout", type=float, default=0.0)
@@ -246,7 +251,8 @@ def main():
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
     aux_lpips = None
     if args.lpips_weight > 0:
-        raw_lpips = LearnedPerceptualImagePatchSimilarity(net_type="squeeze", normalize=True).to(device)
+        raw_lpips = LearnedPerceptualImagePatchSimilarity(net_type=args.lpips_aux_net, normalize=True).to(device)
+        print(f"lpips_aux_net={args.lpips_aux_net} (val metric stays on squeeze for continuity)")
         if args.color_space == "linear_rgb":
             class _LpipsLinearWrapper(torch.nn.Module):
                 def __init__(self, inner):

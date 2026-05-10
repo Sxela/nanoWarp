@@ -473,36 +473,6 @@ were not logged to wandb. From exp08 onward, runs will land in the
 
 ---
 
-## Open follow-ups
-
-- ~~Compute "source-as-prediction" baseline SSIM/LPIPS to know the floor any
-  conditional model has to beat. Five-line script.~~ **Done 2026-05-10.**
-  Floor: SSIM 0.617 / LPIPS 0.199 on val. Best model is 0.740 / 0.153.
-
-- **Rename `FlowConfig.timesteps`** → `time_embedding_scale` or similar.
-  Currently `timesteps=1000` in the flow config is misleading because FM
-  has no discretized timestep schedule — `t` is continuous in [0,1] and we
-  multiply by 999 only to feed into the existing sinusoidal `TimeMLP`
-  (which was originally designed for diffusion's integer timesteps).
-  Could be 100 or 10000 with no functional difference. Cleanup-only;
-  touches saved checkpoint configs so do once, carefully.
-
-- **Best-checkpoint selection (val-LPIPS early stopping).** exp10 showed
-  that LPIPS can regress past the optimum step while SSIM/MSE keep
-  improving. A trainer hook that re-validates every checkpoint and saves
-  `best_lpips.pt` would automate finding the optimum. ~30 lines, runs val
-  in a separate stream so it doesn't block training.
-- Replace `save_loss_plot` with log-y + rolling mean (now optional since
-  wandb handles smoothing).
-- ~~Trainer `--resume` support to continue from a saved checkpoint.~~
-  **Done 2026-05-10.** `--resume PATH` loads model + EMA + optimizer state
-  + step number. Checkpoints (intermediate and final) now include optimizer
-  state and step. Old pre-2026-05-10 checkpoints can still be resumed but
-  AdamW moments restart fresh (warning printed). See exp08 resume command
-  in the exp08 section.
-- Latent flow matching once the pixel-space pipeline is solid.
-- Once exp08 lands: ablate `freeze=all` vs `freeze=partial` on the
-  encoder-on path now that we know freeze=all is stable.
 ### exp09 — exp08-lpips + pixel_shuffle (encoder on, mc=56) — DONE
 
 Tests sub-pixel conv upsampling on the **proven** architecture (exp08-lpips:
@@ -792,10 +762,20 @@ gain is gated by data, not by model design.
 |---|---|---|---|
 | **Larger paired dataset (1k-10k pairs)** | **5-10%** | data generation | **🔴 high** |
 | Higher resolution (256px) | unclear, possibly meaningful | 4x compute | 🟡 medium |
+| VGG-backbone LPIPS aux | unclear, plausible | one flag | 🟡 medium |
 | Longer training + best-LPIPS early-stop | 1-2% | trivial | 🟡 medium |
 | `--lpips-weight 0.4` ablation | 1-2% | 1 flag | 🟡 medium |
-| FiLM + 2 ResBlocks (original Scenario A exp12) | <2% | hour | 🟢 low |
+| FiLM + 2 ResBlocks (Path C continuation) | <2% | hour | 🟢 low |
 | linear RGB everywhere (incl. PIL aug rewrite) | <2% | hours | ⚫ skip |
+
+---
+
+## Planned next experiments
+
+(Below the line: experiments specified but not yet run. Each is a
+single-variable change vs the current best architecture (exp10) so
+attribution stays clean. exp12 and exp13 are orthogonal axes and can
+run in parallel on the two VMs.)
 
 ### exp12 — 256px on the existing 287-pair dataset — PLANNED
 
@@ -864,59 +844,119 @@ Predictions:
   unclear if data scarcity dominates more or less at this resolution.
   Train-val gap diagnostic worth running again after this finishes.
 
-### exp11 / exp12 — original conditional plan (superseded by 256px decision)
+### exp13 — exp10 + VGG-backbone LPIPS aux — PLANNED
 
-Spec ahead of time so the next pair of experiments is unambiguous.
+Single-flag follow-up. Switches the LPIPS auxiliary loss backbone from
+SqueezeNet (~700k params) to VGG16 (~14M params).
 
-**Scenario A — exp10 WINS (no-enc + multi-scale attn closes or beats LPIPS).**
-Attention replaces the ImageNet priors. Push on the rest of the OpenAI UNet
-ladder + orthogonal axes.
+Motivation:
+- All three architectures tested at 128px (exp08-lpips, exp10, exp11) hit
+  the same LPIPS ceiling around 0.152-0.153. One plausible cause: the
+  SqueezeNet aux loss is too crude to drive the model past a certain
+  perceptual quality floor.
+- The classic style-transfer literature (Gatys, Johnson, AnimeGAN) all uses
+  VGG features specifically because deeper VGG layers (`relu4_*`, `relu5_*`)
+  encode texture/style signal well — which is exactly what anime stylization
+  is about.
+- LPIPS-VGG retains LPIPS's learned reweighting from the BAPPS dataset on
+  top of the larger VGG backbone.
 
-- **exp11** = exp10 + linear RGB. Physically correct interpolation in FM
-  (`x_t = (1-t)·source + t·target` only matches light arithmetic in linear
-  space). ~30 lines (sRGB↔linear conversions at dataset / LPIPS / panel
-  boundaries). Free win on FM correctness.
-- **exp12** = exp11 + FiLM time injection + 2 ResBlocks per level. Finishes
-  Path C (the OpenAI UNet upgrade ladder). FiLM is ~5 lines (replace
-  additive `time_proj` with a `(scale, shift)` linear). 2 ResBlocks per
-  level is the standard DDPM/SD pattern.
+Cost: ~10 ms/step extra at bs=4/128px (vs ~2 ms for SqueezeNet). ~3 min
+extra total wall-clock over 20k steps. Negligible.
 
-**Scenario B — exp10 LOSES (encoder priors still required).**
-Attention isn't enough to replace the encoder at this data scale. The
-question becomes: does attention help *on top of* the encoder?
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 88 `
+    --attn-resolutions "8,16,32" `
+    --amp bf16 `
+    --source-dropout 0.15 --lpips-weight 0.2 --lpips-aux-net vgg `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --checkpoint-every 5000 --sample-panel-steps 20 `
+    --num-workers 8 `
+    --wandb --wandb-project nanoWarp `
+    --wandb-run-name exp13_vgg_lpips_noenc_attn832_bf16_mc88_20k `
+    --wandb-tags "flow,no-encoder,lpips-vgg,attn-multiscale,bf16,exp13" `
+    --outdir out/exp13_vgg_lpips_noenc_attn832_bf16_mc88_20k
+```
 
-- **exp11** = exp08-lpips + multi-scale attention(8,16,32) + bf16
-  (encoder ON, mc=64). Single-variable change vs the proven best. The
-  Option A we considered earlier. Tests "does attention help a model
-  that already has good priors?"
-- **exp12** = (winner of exp08-lpips vs exp11) + linear RGB. Same physical-
-  correctness motivation as Scenario A's exp11.
+Note: the **validation metric stays on LPIPS-SqueezeNet** for continuity
+with exp01-exp11 numbers. exp13 results will be directly comparable to
+exp10. If exp13 improves on the same SqueezeNet-LPIPS metric, the bigger
+VGG aux loss was the bottleneck.
 
-**Scenario C — exp10 MIXED (better SSIM, still worse LPIPS).**
-Attention does real structural work but doesn't replace prior compute.
-Combine the wins.
+Predictions:
+- If LPIPS-squeeze improves > 3% vs exp10 → VGG features were a real
+  bottleneck for our perceptual ceiling. Adopt VGG as the new default
+  aux loss for the 1k-pair dataset run too.
+- If LPIPS-squeeze ≈ exp10 → the ceiling is data-bound, not aux-loss-bound.
+  Stay with SqueezeNet (cheaper) and focus on data.
 
-- **exp11** = exp08-lpips + multi-scale attention(8,16,32) + bf16
-  (same as Scenario B's exp11). Tests if SSIM gain stacks with encoder's
-  LPIPS edge.
-- **exp12** = exp11 + linear RGB.
+### exp14 — repeat exp10 architecture on the 1k-pair 1024px dataset — QUEUED
 
-**Things worth running regardless of exp10's outcome:**
-- `--lpips-weight 0.4` ablation on the current best architecture.
-  exp08-lpips's curve was still improving at 20k; pushing harder might
-  unlock more. Single-flag change.
-- **Source-as-prediction baseline metric.** Compute mean SSIM/LPIPS of
-  `source` vs `target` on val (no model, just the metric). 5-line script.
-  Tells us the floor any conditional model has to beat. Without this we
-  can't tell if 0.152 LPIPS is "good" or "barely above do-nothing."
-- `--lpips-weight 0.0` ablation **at 30k steps with attention + bf16**.
-  Tests whether LPIPS aux is still load-bearing once attention is in the
-  model. If so, attention does the perceptual work LPIPS was doing, and
-  we can drop the LPIPS computational overhead.
+The actual data-scaling test. We've established that three different
+architectures at 128px all hit LPIPS ≈ 0.152 — the ceiling is data-bound,
+not architecture-bound. exp14 is the experiment that should break that
+ceiling, by training the same exp10 architecture on ~3.5× more pairs at
+higher source resolution.
 
-| if exp10... | exp11 | exp12 |
-|---|---|---|
-| wins    | + linear RGB                   | + FiLM + 2 ResBlocks             |
-| loses   | + attn on encoder-on baseline  | + linear RGB on the winner       |
-| mixed   | + attn on encoder-on baseline  | + linear RGB on exp11            |
-| any     | source-baseline metric, lpips=0.4 ablation | ↑ |
+Specifics depend on the final dataset shape (still being generated). Likely:
+- Same architecture as exp10 (no encoder, mc=88, attn 8/16/32 — or 16/32/64
+  if we go with 256px training; see exp12 result first).
+- Same FM + LPIPS aux 0.2 + bf16 + grad clip + LR warmup/cosine.
+- Step count: probably 30-40k (more data → more diverse gradient signal,
+  longer to converge).
+- Dataset prep: similar to `prepare_photo2anime.py`, scaled to 1k pairs.
+  Likely split 950 train / 50 val to keep val noise consistent with exp01-11.
+
+Open question: drop the train resolution from 1024 to 128px or 256px or
+something else? Probably 256px assuming exp12 looks reasonable.
+
+Will write the full launch command once the dataset is materialised.
+
+---
+
+## Open follow-ups
+
+- ~~Compute "source-as-prediction" baseline SSIM/LPIPS.~~ **Done 2026-05-10.**
+  Floor at 128px val: SSIM 0.617 / LPIPS 0.199. Floor at 256px val:
+  SSIM 0.557 / LPIPS 0.299. Best 128px model: SSIM 0.740 / LPIPS 0.153.
+
+- ~~Trainer `--resume` support.~~ **Done 2026-05-10.** Checkpoints
+  (intermediate and final) include model + EMA + optimizer state + step.
+  See exp08 resume command in its section.
+
+- **Rename `FlowConfig.timesteps`** → `time_embedding_scale`. Currently
+  `timesteps=1000` is misleading because FM has no discretized timestep
+  schedule — `t` is continuous in [0,1] and we multiply by 999 only for
+  the sinusoidal `TimeMLP`. Cleanup-only; touches checkpoint configs.
+
+- **Best-checkpoint selection (val-LPIPS early stopping).** exp10/exp11
+  showed LPIPS can regress past the optimum while SSIM/MSE keep improving.
+  A trainer hook that re-validates every checkpoint and saves
+  `best_lpips.pt` would automate finding the optimum. ~30 lines.
+
+- Replace `save_loss_plot` with log-y + rolling mean. Lower priority now
+  that wandb handles smoothing.
+
+- Latent flow matching once the pixel-space pipeline is solid. Big lift
+  (need an autoencoder), parked for when we have the bigger dataset
+  results in hand.
+
+- **Ablate `freeze=all` vs `freeze=partial`** on the encoder-on path now
+  that we know freeze=all is stable. exp08-lpips uses freeze=all; checking
+  whether freeze=partial would have worked too (and unlocked the deeper
+  ResNet layers for task adaptation) would be informative.
+
+- **Cheap SOTA-inspired patterns to consider** (post-exp14, see survey
+  earlier in this document):
+  - Zero-init gate on `FuseBlock` output (ControlNet trick): ~3 lines.
+    Training stability.
+  - Multi-scale L1/L2 loss alongside main loss (SR convention): ~10 lines.
+    Small perceptual gain.
+  - Charbonnier loss replacing pure MSE in the FM/diffusion path:
+    trivial, minor numerical-stability benefit.
+  - Window attention (SwinIR-style) at high resolutions: medium effort,
+    relevant if we go ≥ 512px.
+
