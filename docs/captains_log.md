@@ -711,13 +711,21 @@ python scripts/train.py img2img-v1 data/photo2anime `
     --color-space linear_rgb `
     --source-dropout 0.15 --lpips-weight 0.2 `
     --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
-    --checkpoint-every 1000 --sample-panel-steps 20 `
+    --checkpoint-every 5000 --sample-panel-steps 20 `
     --num-workers 8 `
     --wandb --wandb-project nanoWarp `
     --wandb-run-name exp11_linrgb_noenc_attn832_bf16_mc88_30k `
     --wandb-tags "flow,no-encoder,lpips,attn-multiscale,bf16,linear-rgb,exp11" `
     --outdir out/exp11_linrgb_noenc_attn832_bf16_mc88_30k
 ```
+
+Notes:
+- `--num-workers 8` enables the full dataloader speedup (pin_memory +
+  persistent_workers + non_blocking auto-on, ~2.7× data-loading throughput).
+- `--checkpoint-every 5000` saves 5 intermediate + 1 final = 6 checkpoints
+  total (~2 GB disk) instead of 30 (~20 GB). Still enough granularity to
+  identify best-LPIPS step from the val curve. If you need finer for some
+  reason, set to 2500.
 
 Predictions:
 - LPIPS: -2 to -5% vs exp10 (0.146-0.150 range vs exp10's 0.153)
