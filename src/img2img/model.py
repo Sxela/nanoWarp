@@ -260,6 +260,8 @@ class Img2ImgDiffusionUNet(nn.Module):
         source_in_stem: bool = False,
         use_source_encoder: bool = True,
         upsample_type: str = "resize_conv",
+        attn_resolutions: tuple[int, ...] = (8,),
+        image_size: int = 128,
     ):
         super().__init__()
         if upsample_type not in ("resize_conv", "pixel_shuffle"):
@@ -269,6 +271,8 @@ class Img2ImgDiffusionUNet(nn.Module):
         self.use_source_encoder = use_source_encoder
         self.source_in_stem = source_in_stem
         self.upsample_type = upsample_type
+        self.attn_resolutions = tuple(sorted(set(int(r) for r in attn_resolutions)))
+        self.image_size = image_size
         if use_source_encoder:
             self.source_encoder = SourceEncoder(
                 in_ch=3,
@@ -307,6 +311,25 @@ class Img2ImgDiffusionUNet(nn.Module):
         self.mid_attn = BottleneckAttention(cm)
         self.mid2 = ResBlock(cm, cm, time_dim * 4)
 
+        # Encoder-side resolutions for the four levels at this image_size.
+        # h1 stays at image_size, then each ds halves.
+        level_resolutions = (
+            image_size,         # after down1 (level 1)
+            image_size // 2,    # after down2 (level 2)
+            image_size // 4,    # after down3 (level 3)
+            image_size // 8,    # after down4 (level 4)
+        )
+        level_channels = (c1, c2, c3, c4)
+        attn_set = set(self.attn_resolutions)
+        # Conditionally create per-level self-attention. None when not requested,
+        # which keeps the state_dict empty and old checkpoints loadable.
+        # The bottleneck attention (8x8 by default) is mid_attn above and is
+        # always present.
+        self.attn1 = BottleneckAttention(level_channels[0]) if level_resolutions[0] in attn_set else None
+        self.attn2 = BottleneckAttention(level_channels[1]) if level_resolutions[1] in attn_set else None
+        self.attn3 = BottleneckAttention(level_channels[2]) if level_resolutions[2] in attn_set else None
+        self.attn4 = BottleneckAttention(level_channels[3]) if level_resolutions[3] in attn_set else None
+
         if use_source_encoder:
             # SourceEncoder (ResNet18) feature widths are fixed: 64, 64, 128, 256, 512.
             self.fuse1 = FuseBlock(c1, 64)
@@ -339,16 +362,32 @@ class Img2ImgDiffusionUNet(nn.Module):
         if self.use_source_encoder:
             src_feats = self.source_encoder(source)
             h1 = self.fuse1(self.down1(x0, t_emb), src_feats[0])
+            if self.attn1 is not None:
+                h1 = self.attn1(h1)
             h2 = self.fuse2(self.down2(self.ds1(h1), t_emb), src_feats[1])
+            if self.attn2 is not None:
+                h2 = self.attn2(h2)
             h3 = self.fuse3(self.down3(self.ds2(h2), t_emb), src_feats[2])
+            if self.attn3 is not None:
+                h3 = self.attn3(h3)
             h4 = self.fuse4(self.down4(self.ds3(h3), t_emb), src_feats[3])
+            if self.attn4 is not None:
+                h4 = self.attn4(h4)
             mid = self.mid1(self.ds4(h4), t_emb)
             mid = self.mid_fuse(mid, src_feats[4])
         else:
             h1 = self.down1(x0, t_emb)
+            if self.attn1 is not None:
+                h1 = self.attn1(h1)
             h2 = self.down2(self.ds1(h1), t_emb)
+            if self.attn2 is not None:
+                h2 = self.attn2(h2)
             h3 = self.down3(self.ds2(h2), t_emb)
+            if self.attn3 is not None:
+                h3 = self.attn3(h3)
             h4 = self.down4(self.ds3(h3), t_emb)
+            if self.attn4 is not None:
+                h4 = self.attn4(h4)
             mid = self.mid1(self.ds4(h4), t_emb)
         mid = self.mid_attn(mid)
         mid = self.mid2(mid, t_emb)

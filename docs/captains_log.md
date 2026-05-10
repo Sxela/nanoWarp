@@ -250,7 +250,7 @@ within noise) and **visually much better** — the qualitative jump from
 panel previewed translates through to convergence. **LPIPS aux is now
 load-bearing in the recipe**; runs without it are no longer interesting.
 
-### exp08-noenc — drop source encoder, widen UNet, keep LPIPS — RUNNING (resumed from step 5k)
+### exp08-noenc — drop source encoder, widen UNet, keep LPIPS — DONE
 
 Following findings from exp07b + exp08-lpips:
 - Encoder freezing fixed the optimizer collapse (exp05/06 → exp07b stable).
@@ -281,16 +281,36 @@ python scripts/train.py img2img-v1 data/photo2anime `
 Param count: 43.9M total, all trainable (vs exp07b's 42.7M total with
 11.2M frozen). UNet widths: 88 / 176 / 352 / 352 / 704.
 
-Predictions:
-- If exp08-noenc ≈ or > exp08-lpips at step 20k → encoder was redundant given
-  stem concat + larger UNet. Smaller, simpler model wins.
-- If exp08-noenc < exp08-lpips → ImageNet semantic priors in the encoder were
-  doing real work; keep it. Next move would be to test `freeze=all` with the
-  *unmodified* ResNet (no fuses, just stem) to isolate the prior contribution.
+Run launched 2026-05-10 morning, killed at step ~5000, resumed from
+`model_step_005000.pt` after `--resume` shipped, killed again at step 17k
+for GPU contention, resumed once more from `model_step_017000.pt` to finish.
+Three wandb runs total: `exp08_noenc_lpips_mc88_20k`,
+`exp08_noenc_lpips_mc88_20k_resumed`, `exp08_noenc_lpips_mc88_20k_resumed2`.
 
-Run launched 2026-05-10 morning, originally killed at step ~5000, then
-resumed from `model_step_005000.pt` after `--resume` shipped. Wandb run
-continues as `exp08_noenc_lpips_mc88_20k_resumed`.
+Final val (full 13 batches × bs=4 = 52 examples, EMA + 20-step Euler):
+
+| metric | exp08-lpips (encoder on, mc=64) | **exp08-noenc (no encoder, mc=88)** | delta |
+|---:|---:|---:|---:|
+| mean_loss | — | 0.0053 | — |
+| **SSIM ↑** | 0.719 | **0.734** | **+2.1%** |
+| **LPIPS ↓** | 0.152 | **0.159** | **+4.3%** worse |
+| trainable params | 31.6M | 23.7M | −25% |
+| total params | 42.7M | 23.7M | −44% |
+
+**Mixed result — split decision.**
+- SSIM win: pure-pixel UNet preserves structure better.
+- LPIPS loss: ImageNet pretrained encoder was contributing real perceptual
+  priors. LPIPS itself uses ImageNet-trained SqueezeNet, so part of this gap
+  may be "encoder features happen to align with what LPIPS rewards."
+
+**Conclusion:**
+- For best quality so far: exp08-lpips (encoder on). The encoder earns its
+  keep on LPIPS specifically.
+- For deployment-size-constrained variants: exp08-noenc is ~2× smaller total
+  for ~3% perceptual cost. Real option if size matters.
+- **Open question for exp10**: can multi-scale attention rescue no-encoder's
+  perceptual gap? If yes → simpler, smaller architecture wins overall. exp10
+  is built on exp08-noenc to test this.
 
 ### Weights & Biases (added 2026-05-10)
 
@@ -329,25 +349,142 @@ were not logged to wandb. From exp08 onward, runs will land in the
 - Latent flow matching once the pixel-space pipeline is solid.
 - Once exp08 lands: ablate `freeze=all` vs `freeze=partial` on the
   encoder-on path now that we know freeze=all is stable.
-- **exp09 — PixelShuffle upsampling.** Already wired under
-  `--upsample-type pixel_shuffle` (with ICNR init to avoid checkerboard).
-  Sub-pixel conv often produces sharper edges than resize+conv, especially
-  for image-translation tasks where iteration count is low (FM uses 4-10
-  Euler steps vs DDIM-50). The fastai UNet picked PixelShuffle for exactly
-  this reason. Caveat: each up-block grows from `channels^2 * 9` to
-  `4 * channels^2 * 9` params, so pixel_shuffle at `--model-ch 88` is
-  64.9M total (vs 43.9M for resize_conv at the same width). For
-  param-matched comparison vs exp08, run pixel_shuffle at `--model-ch 72`.
+### exp09 — exp08-lpips + pixel_shuffle (encoder on, mc=56) — DONE
 
-  ```powershell
-  python scripts/train.py img2img-v1 data/photo2anime `
-      --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
-      --method flow --flow-sigma-noise 0.05 `
-      --no-source-encoder --model-ch 72 `
-      --upsample-type pixel_shuffle `
-      --source-dropout 0.15 --lpips-weight 0.2 `
-      --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
-      --checkpoint-every 1000 --sample-panel-steps 20 `
-      --wandb --wandb-tags "flow,no-encoder,lpips,pixel-shuffle,exp09" `
-      --outdir out/exp09_pixshuf_lpips_mc72_20k
-  ```
+Tests sub-pixel conv upsampling on the **proven** architecture (exp08-lpips:
+encoder on, FM, LPIPS 0.2). Single-variable change vs exp08-lpips:
+`--upsample-type pixel_shuffle` instead of resize+conv. ICNR init applied to
+avoid checkerboard artifacts at training start.
+
+Param-matched to exp08-lpips by lowering `--model-ch 64 → 56`, since
+PixelShuffle's `channels → 4·channels` upsamplers add ~21M params. At mc=56
+with pixel_shuffle the total is **44.1M / 32.9M trainable**, within ~3% of
+exp08-lpips's 42.7M / 31.6M.
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --freeze-source-encoder all --model-ch 56 `
+    --upsample-type pixel_shuffle `
+    --source-dropout 0.15 --lpips-weight 0.2 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --checkpoint-every 1000 --sample-panel-steps 20 `
+    --wandb --wandb-project nanoWarp `
+    --wandb-run-name exp09_pixshuf_lpips_mc56_20k `
+    --wandb-tags "flow,encoder-on,lpips,pixel-shuffle,exp09" `
+    --outdir out/exp09_pixshuf_lpips_mc56_20k
+```
+
+Final val curve vs exp08-lpips (resize_conv, mc=64) at every checkpoint:
+
+| step | exp08-lpips SSIM | **exp09 SSIM** | exp08-lpips LPIPS | **exp09 LPIPS** |
+|---:|---:|---:|---:|---:|
+|  1k | 0.608 | **0.583** | 0.161 | **0.170** |
+|  5k | 0.678 | **0.655** | 0.148 | **0.153** |
+| 10k | 0.703 | **0.685** | 0.148 | **0.153** |
+| 15k | 0.715 | **0.700** | 0.150 | **0.154** |
+| 20k | 0.719 | **0.707** | 0.152 | **0.155** |
+
+**Result: pixel_shuffle strictly worse on both metrics at every step.** Gap
+is small (~1.5% on SSIM, ~2% on LPIPS) but persistent across the whole run.
+Caveat: the param match wasn't perfect — exp09 had 32.9M trainable
+(vs exp08-lpips's 31.6M), so exp09 was slightly *larger* and still lost.
+The "smaller model lost" explanation is ruled out.
+
+What this tells us:
+- The fastai-era PixelShuffle intuition doesn't carry. Probably because
+  LPIPS aux 0.2 is already pushing for perceptual sharpness; the marginal
+  contribution of "learnable single-step upsample" disappears.
+- The 4× param cost in PixelShuffle's upsamplers got reallocated to width
+  (64 → 56). Wider channels at every level beat sharper upsamplers at lower
+  width on this task.
+- ICNR init worked: losses are smooth, no checkerboard catastrophe. The
+  implementation is fine — the technique just doesn't pay off here.
+
+**Decision: resize_conv stays the default.** Flag remains available
+(`--upsample-type pixel_shuffle`) for future tasks where the trade-off may
+flip (e.g. higher resolution, no aux loss).
+
+### exp10 — multi-scale attention + bf16 on top of exp08-noenc — PLANNED (run on second VM)
+
+Hypothesis: multi-scale self-attention can replace the perceptual priors that
+exp08-noenc lost when we dropped the ImageNet encoder. If true, we get a
+~24M-trainable model (vs exp08-lpips's 32M+11M frozen) with equal or better
+LPIPS — a real architectural win for size.
+
+Builds on exp08-noenc (no encoder, mc=88, FM, dropout, LPIPS 0.2). Two new
+variables vs exp08-noenc:
+- `--attn-resolutions "8,16,32"` adds self-attention at 16x16 and 32x32
+  (was bottleneck-only at 8x8). Resolution-conditional construction means
+  old checkpoints still load.
+- `--amp bf16` enables Tensor Core / FlashAttention path on the 4090.
+  Same exp range as fp32, no GradScaler needed. ~20% step speedup +
+  ~10% activation memory savings. Free win baseline-wide.
+
+Footprint (measured on 4090, bs=4 at 128px):
+
+| variant | params | step ms | peak VRAM |
+|---|---:|---:|---:|
+| exp08-lpips baseline (attn=8, fp32) | 42.7M | 39.3 | 1253 MB |
+| exp08-noenc baseline (attn=8, fp32) | 23.7M | 35-ish | similar |
+| **exp10 = no-enc + attn(8,16,32) + bf16, mc=88** | **24.3M** | **~30** | **~1100 MB** |
+
+Long run, 30k steps (vs the standard 20k) since smaller model + extra aux
+signal benefits from more convergence time. With bf16 step ~30% faster,
+30k bf16 steps takes about the same wall-clock as 23k fp32 steps.
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --steps 30000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 88 `
+    --attn-resolutions "8,16,32" `
+    --amp bf16 `
+    --source-dropout 0.15 --lpips-weight 0.2 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --checkpoint-every 1000 --sample-panel-steps 20 `
+    --wandb --wandb-project nanoWarp `
+    --wandb-run-name exp10_noenc_attn832_bf16_mc88_30k `
+    --wandb-tags "flow,no-encoder,lpips,attn-multiscale,bf16,exp10" `
+    --outdir out/exp10_noenc_attn832_bf16_mc88_30k
+```
+
+Resume command shape (if killed mid-run; replace step number):
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --steps 30000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 88 `
+    --attn-resolutions "8,16,32" `
+    --amp bf16 `
+    --source-dropout 0.15 --lpips-weight 0.2 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --checkpoint-every 1000 --sample-panel-steps 20 `
+    --resume out/exp10_noenc_attn832_bf16_mc88_30k/model_step_NNNNNN.pt `
+    --wandb --wandb-project nanoWarp `
+    --wandb-run-name exp10_noenc_attn832_bf16_mc88_30k_resumed `
+    --wandb-tags "flow,no-encoder,lpips,attn-multiscale,bf16,exp10,resume" `
+    --outdir out/exp10_noenc_attn832_bf16_mc88_30k
+```
+
+Predictions:
+- If exp10 LPIPS ≤ exp08-lpips's 0.152 → multi-scale attention can compensate
+  for losing the ImageNet encoder. Smaller, simpler, encoder-free model wins.
+- If exp10 LPIPS still ~0.159 (matches exp08-noenc) → attention helps but
+  doesn't replace the specific ImageNet feature alignment LPIPS rewards.
+  Encoder stays in the recipe.
+- If exp10 SSIM > 0.734 → attention is doing real work for structure
+  preservation on top of no-encoder's already-strong SSIM.
+
+Comparison table to fill in once results land:
+
+| step | exp08-noenc SSIM | exp10 SSIM | exp08-noenc LPIPS | exp10 LPIPS |
+|---:|---:|---:|---:|---:|
+|  1k |  |  |  |  |
+|  5k |  |  |  |  |
+| 10k |  |  |  |  |
+| 15k |  |  |  |  |
+| 20k | 0.734 |  | 0.159 |  |
+| 30k | — |  | — |  |

@@ -47,12 +47,16 @@ def main():
 
     ckpt = torch.load(args.checkpoint, map_location=device)
     train_cfg = ckpt.get("config", {})
+    attn_res_str = train_cfg.get("attn_resolutions", "8")
+    attn_res = tuple(int(x) for x in str(attn_res_str).split(",") if x.strip())
     model = Img2ImgDiffusionUNet(
         model_ch=train_cfg.get("model_ch", 64),
         pretrained_source_encoder=False,
         source_in_stem=train_cfg.get("source_in_stem", False),
         use_source_encoder=not train_cfg.get("no_source_encoder", False),
         upsample_type=train_cfg.get("upsample_type", "resize_conv"),
+        attn_resolutions=attn_res,
+        image_size=train_cfg.get("image_size", 128),
     ).to(device)
     state_key = "ema_model" if args.use_ema and "ema_model" in ckpt else "model"
     model.load_state_dict(ckpt[state_key])

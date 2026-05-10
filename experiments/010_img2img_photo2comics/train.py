@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import subprocess
+from contextlib import nullcontext
 from pathlib import Path
 
 import torch
@@ -74,6 +75,14 @@ def parse_args():
     p.add_argument("--upsample-type", choices=["resize_conv", "pixel_shuffle"], default="resize_conv",
                    help="Decoder upsampler. resize_conv = nearest interp + 3x3 conv (DDPM-style, default). "
                         "pixel_shuffle = sub-pixel conv with ICNR init (sharper edges, fastai-style).")
+    p.add_argument("--attn-resolutions", default="8",
+                   help="Comma-separated list of UNet feature-map resolutions where self-attention is applied "
+                        "(in addition to the always-on bottleneck attention). e.g. '8' (current default = "
+                        "bottleneck only), '8,16', '8,16,32'. Applies after FuseBlock at each level.")
+    p.add_argument("--amp", choices=["none", "bf16"], default="none",
+                   help="Mixed-precision training. bf16 wraps forward+loss in autocast (fp32 master weights "
+                        "preserved by AdamW). Unlocks FlashAttention on Ampere+/Ada GPUs and ~half activation "
+                        "memory. Default off for fp32 baseline reproducibility.")
     p.add_argument("--freeze-source-encoder", choices=["none", "stem", "partial", "all"], default="partial",
                    help="Which ResNet stages of the source encoder to freeze. "
                         "stem=conv1+bn1; partial=stem+layer1 (current default); all=stem+layer1+layer2+layer3+layer4. "
@@ -192,6 +201,7 @@ def main():
 
     freeze_stages = FREEZE_STAGE_PRESETS[args.freeze_source_encoder]
     use_source_encoder = not args.no_source_encoder
+    attn_resolutions = tuple(int(x) for x in args.attn_resolutions.split(",") if x.strip())
     model = Img2ImgDiffusionUNet(
         model_ch=args.model_ch,
         pretrained_source_encoder=not args.no_pretrained,
@@ -199,8 +209,10 @@ def main():
         source_in_stem=args.source_in_stem,
         use_source_encoder=use_source_encoder,
         upsample_type=args.upsample_type,
+        attn_resolutions=attn_resolutions,
+        image_size=args.image_size,
     ).to(device)
-    print(f"use_source_encoder={use_source_encoder} model_ch={args.model_ch} unet_channels={model.unet_channels} upsample={args.upsample_type}")
+    print(f"use_source_encoder={use_source_encoder} model_ch={args.model_ch} unet_channels={model.unet_channels} upsample={args.upsample_type} attn_resolutions={model.attn_resolutions}")
     print(f"freeze_source_encoder={args.freeze_source_encoder} stages={freeze_stages}")
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -236,6 +248,10 @@ def main():
         if start_step > args.steps:
             raise SystemExit(f"resume step {start_step} > --steps {args.steps}; pass a larger --steps")
 
+    amp_dtype = torch.bfloat16 if args.amp == "bf16" else None
+    use_amp = amp_dtype is not None and device.type == "cuda"
+    print(f"amp={args.amp}  autocast_active={use_amp}")
+
     losses: list[float] = []
     val_history: list[float] = []
     grad_norms: list[float] = []
@@ -249,16 +265,18 @@ def main():
         batch = next(it)
         source = batch["source"].to(device)
         target = batch["target"].to(device)
-        loss, t, x_t, _noise, _model_out, x0_hat, diffusion_loss, lpips_loss = diffusion.training_loss(
-            model,
-            source,
-            target,
-            aux_lpips=aux_lpips,
-            aux_lpips_weight=args.lpips_weight,
-            t_low=t_low,
-            t_high=t_high,
-            source_dropout=args.source_dropout,
-        )
+        amp_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext()
+        with amp_ctx:
+            loss, t, x_t, _noise, _model_out, x0_hat, diffusion_loss, lpips_loss = diffusion.training_loss(
+                model,
+                source,
+                target,
+                aux_lpips=aux_lpips,
+                aux_lpips_weight=args.lpips_weight,
+                t_low=t_low,
+                t_high=t_high,
+                source_dropout=args.source_dropout,
+            )
 
         opt.zero_grad(set_to_none=True)
         loss.backward()
@@ -290,7 +308,8 @@ def main():
                 }, step=step)
         if step % args.panel_every == 0 or step == args.steps:
             model.eval()
-            with torch.no_grad():
+            sample_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext()
+            with torch.no_grad(), sample_ctx:
                 samples_panel, _ = diffusion.sample(
                     model,
                     source,
@@ -298,6 +317,7 @@ def main():
                     sample_steps=args.sample_panel_steps,
                     log_every=None,
                 )
+            samples_panel = samples_panel.float()
             model.train()
             panel_path = outdir / f"panel_step_{step:06d}.png"
             save_val_panel(
