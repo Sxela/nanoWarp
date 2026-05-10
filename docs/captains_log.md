@@ -742,19 +742,24 @@ with n=50). The -2 to -5% LPIPS prediction was wrong.
   converge to the same ~0.152-0.153 best-LPIPS ceiling. The architectural
   ceiling for this dataset is real.**
 
-### Architectural ceiling — strong evidence
+### Architectural ceiling — strong evidence (at 128px specifically)
 
 | model | best LPIPS | best SSIM | trainable params | external priors |
 |---|---:|---:|---:|---|
 | exp08-lpips | **0.152** | 0.719 | 31.6M | ImageNet ResNet18 |
 | exp10 | 0.153 | **0.736** | 43.9M | none |
 | exp11 (linear) | 0.153 | 0.732 | 43.9M | none |
-| floor | 0.199 | 0.617 | 0 | — |
+| floor (128px) | 0.199 | 0.617 | 0 | — |
 
-All three architectures land within ~0.001 LPIPS of each other. **More
-architecture work at this scale produces ~zero perceptual gain.** The ~0.05
-LPIPS gap to the floor is real, but the next ~0.05 to a meaningful absolute
-gain is gated by data, not by model design.
+All three architectures land within ~0.001 LPIPS of each other at 128px.
+**More architecture work at 128px produces ~zero perceptual gain.**
+
+**Caveat (added 2026-05-10 after exp12):** this ceiling turned out to be
+**a 128px artifact, not an absolute one.** exp12 at 256px hit LPIPS 0.142,
+substantially below the 0.152 ceiling — and the LPIPS-vs-floor improvement
+went from 23% to 53%, a 2.3× relative jump. The architectures weren't out
+of expressiveness; they were out of pixels. Resolution turned out to be
+the highest-leverage single axis we tested.
 
 ### Recommended next moves (revised after exp11)
 
@@ -777,7 +782,42 @@ single-variable change vs the current best architecture (exp10) so
 attribution stays clean. exp12 and exp13 are orthogonal axes and can
 run in parallel on the two VMs.)
 
-### exp12 — 256px on the existing 287-pair dataset — PLANNED
+### exp12 — 256px on the existing 287-pair dataset — DONE
+
+Result table (val split, 13 batches × bs=4 = 52 examples, EMA + 20-step Euler):
+
+| step | exp10 @ 128 SSIM | exp12 @ 256 SSIM | exp10 @ 128 LPIPS | exp12 @ 256 LPIPS |
+|---:|---:|---:|---:|---:|
+|  5k | — | 0.627 | — | 0.154 |
+| 10k | — | 0.655 | — | 0.144 |
+| 15k | — | 0.666 | — | 0.141 |
+| 20k | 0.736 | 0.669 | 0.153 | **0.142** |
+
+**Resolution-aware comparison (relative to do-nothing floor):**
+
+| | floor | best | improvement vs floor |
+|---|---:|---:|---:|
+| exp10 @ 128px LPIPS | 0.199 | 0.153 | **−23%** |
+| exp12 @ 256px LPIPS | 0.299 | **0.142** | **−53%** |
+| exp10 @ 128px SSIM | 0.617 | 0.736 | +19% |
+| exp12 @ 256px SSIM | 0.557 | 0.669 | +20% |
+
+**Resolution more than 2× the LPIPS-vs-floor improvement** (23% → 53%).
+This is by far the biggest single-axis improvement we've seen. SSIM-vs-floor
+stayed roughly the same — confirming SSIM is mostly capacity-limited even at
+low resolution, while LPIPS captures detail/perceptual signal that scales
+with pixel budget.
+
+LPIPS optimum: ~15k (0.141), flat through 20k. SSIM still climbing at 20k —
+suggests exp14 (with more data) should extend training past 20k.
+
+**Headline finding revision:** the "architectural ceiling at LPIPS ≈ 0.152"
+we observed across exp08-lpips / exp10 / exp11 was specifically a **128px
+artifact**, not an absolute ceiling. The architectures didn't run out of
+expressiveness — they ran out of pixels. exp12 at 256px breaks past it
+cleanly, and exp14 (with 1k pairs at 256px) should push further.
+
+### exp12 — original spec (kept for reference)
 
 After exp10 / exp11 confirmed an architectural ceiling at 128px (LPIPS ~0.152
 across three different architectures), the natural next axis is resolution
@@ -955,27 +995,157 @@ Predictions:
   expected gain is "stronger anime stylization" which may not score on
   pairwise LPIPS but is the qualitative win.
 
-### exp14 — repeat exp10 architecture on the 1k-pair 1024px dataset — QUEUED
+### exp16 — GAN aux loss for shape complexity — DRAFTED (not yet implemented)
 
-The actual data-scaling test. We've established that three different
-architectures at 128px all hit LPIPS ≈ 0.152 — the ceiling is data-bound,
-not architecture-bound. exp14 is the experiment that should break that
-ceiling, by training the same exp10 architecture on ~3.5× more pairs at
-higher source resolution.
+Triggered by visual inspection finding **shape simplicity** in our outputs:
+crisp lines where they exist, but fewer of them than the target. The model
+draws "soft cartoon" — locally plausible but topologically simpler than the
+target anime art.
 
-Specifics depend on the final dataset shape (still being generated). Likely:
-- Same architecture as exp10 (no encoder, mc=88, attn 8/16/32 — or 16/32/64
-  if we go with 256px training; see exp12 result first).
-- Same FM + LPIPS aux 0.2 + bf16 + grad clip + LR warmup/cosine.
-- Step count: probably 30-40k (more data → more diverse gradient signal,
-  longer to converge).
-- Dataset prep: similar to `prepare_photo2anime.py`, scaled to 1k pairs.
-  Likely split 950 train / 50 val to keep val noise consistent with exp01-11.
+Distinct from blur (positional uncertainty smearing pixels). Shape
+simplicity is about the model finding a *low-complexity attractor*: the
+common subset of shapes across pairs that are correct most often. This is
+what GANs in the pix2pix lineage (pix2pix → pix2pixHD → AnimeGAN →
+AnimeGANv3) explicitly fix: a discriminator can identify
+"this is too smoothed/simple to be real anime" in ways static perceptual
+losses can't.
 
-Open question: drop the train resolution from 1024 to 128px or 256px or
-something else? Probably 256px assuming exp12 looks reasonable.
+**Why our other losses don't fully fix this:**
+- LPIPS at weight 0.2 is a regression-to-feature-mean tilt that *encourages*
+  simplification.
+- Gram (exp15) matches statistical complexity but doesn't punish per-image
+  simplification — two images with similar Gram can have different complexity.
+- L1/MSE rewards average shapes when uncertain.
 
-Will write the full launch command once the dataset is materialised.
+**Architecture sketch:**
+- Small PatchGAN discriminator (à la pix2pix), ~3M params (vs our 24M
+  generator). Takes `(source, output)` pair, outputs per-patch real/fake
+  scores.
+- Spectral norm on every discriminator conv (already shipped as
+  `torch.nn.utils.spectral_norm`; the standard pix2pix recipe).
+- **Hinge loss** preferred over BCE: more stable, avoids the
+  discriminator-saturation issue.
+- λ_gan = 0.1 → 1.0; start at 0.1 (auxiliary regularizer, not primary
+  signal). pix2pix used 1.0 with bigger discriminators; AnimeGAN uses
+  ~0.5-1.0.
+- Alternating G/D updates each step (1:1) or D-every-other-step (1:2).
+- Discriminator LR 1e-4 with AdamW(β1=0.5, β2=0.999) (pix2pix convention).
+
+**Cost:**
+- ~150 lines: discriminator module, GAN loss helper, alternating updates
+  in trainer, separate D optimizer + EMA.
+- ~30% slower per step (extra D forward+backward).
+- 2-3 short runs to tune λ_gan and D update frequency.
+- Stability risk: GANs can collapse. Mitigated by spectral norm + small λ.
+
+**Why we didn't implement it yet:**
+- exp12 (256px) and exp14 (1k pairs) are likely to address most of the
+  shape-simplicity issue at lower complexity cost.
+- GAN training is real engineering and we should defer it until we know
+  the simpler levers can't get there.
+- This spec exists so we know what "exp16" means if we need to escalate.
+
+```powershell
+# (sketch only — implementation TBD)
+python scripts/train.py img2img-v1 data/photo2anime `
+    --steps 30000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 88 `
+    --attn-resolutions "8,16,32" `
+    --amp bf16 `
+    --source-dropout 0.15 --lpips-weight 0.1 `
+    --gan-weight 0.1 --gan-d-channels 64 --gan-d-lr 1e-4 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --checkpoint-every 5000 --sample-panel-steps 20 `
+    --num-workers 8 `
+    --wandb --wandb-tags "flow,no-encoder,lpips,gan,exp16" `
+    --outdir out/exp16_gan_noenc_attn832_bf16_mc88_30k
+```
+
+Predictions:
+- If exp12 + exp14 close the shape-simplicity gap → exp16 unnecessary,
+  skip the implementation cost.
+- If they don't → exp16 is the standard pix2pix-lineage fix and very
+  likely (~80% confidence) to give visible complexity gains. Cost
+  ~150 LoC + a stability-conscious tuning pass.
+
+### exp14 — exp10/exp12 architecture on the 1k-pair 1024px dataset — READY
+
+The actual data-scaling test. Three different architectures at 128px all hit
+LPIPS ≈ 0.152 — the ceiling is data-bound, not architecture-bound. exp14 is
+the experiment that should break that ceiling.
+
+Dataset (materialised 2026-05-10):
+
+```
+data/photo2anime_1k/
+  train/source + train/target  (908 pairs, indices 000000..000907)
+  val/source + val/target      (100 pairs, indices 000908..001007)
+```
+
+- 3.5× more pairs than the original (287 → 908 train).
+- Source resolution is 1024px, much higher than the original — gives the
+  augmentation pipeline real room for zoom-crop variations.
+- Val split bumped from 50 → 100 → tighter confidence intervals on the
+  metrics (val noise was ±2% with n=50; should drop to ±1.5% with n=100).
+
+Augmentation knobs added (2026-05-10):
+- `--aug-resize-scale` (default 1.10): intermediate resize ratio before
+  random crop. With 1024px source images we can crank this much higher.
+- `--aug-scale-jitter` (default 0.10): affine scale jitter around the crop.
+  Higher value gives more zoom variation.
+
+Suggested values for exp14 at 256px training:
+- `--aug-resize-scale 1.5` → intermediate 384px (still well under 1024px
+  source, plenty of crop variety).
+- `--aug-scale-jitter 0.15` → effective scale range [0.85, 1.15] before crop.
+
+Architecture: same as exp10 (no encoder, mc=88, FM, LPIPS aux 0.2, bf16,
+dropout, full attention coverage). Resolution: 256px (per exp12 plan)
+with `--attn-resolutions "16,32,64"` to maintain fractional attention
+coverage.
+
+Step count: 40k. More data gradient signal benefits from longer training;
+the val-LPIPS curve from exp08-lpips/exp10 was still improving at 20k with
+287 pairs, so with 3.5× more data the optimum step is likely deeper.
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime_1k `
+    --steps 40000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 88 `
+    --image-size 256 `
+    --attn-resolutions "16,32,64" `
+    --amp bf16 `
+    --color-space srgb `
+    --source-dropout 0.15 --lpips-weight 0.2 `
+    --aug-resize-scale 1.5 --aug-scale-jitter 0.15 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 1000 --lr-cosine --lr-min 1e-5 `
+    --checkpoint-every 5000 --sample-panel-steps 20 `
+    --num-workers 8 `
+    --wandb --wandb-project nanoWarp `
+    --wandb-run-name exp14_ds1k_256px_noenc_attn163264_bf16_mc88_40k `
+    --wandb-tags "flow,no-encoder,lpips,attn-multiscale,bf16,1k-dataset,256px,exp14" `
+    --outdir out/exp14_ds1k_256px_noenc_attn163264_bf16_mc88_40k
+```
+
+Wall-clock estimate: at 256px ~120-160 ms/step (per the exp12 estimate).
+40k steps ≈ 80-100 min. With 1k-dataset's better gradient signal-to-noise
+ratio, expect smoother convergence.
+
+Predictions:
+- LPIPS at 256px floor is 0.299 (vs 0.199 at 128px). exp14 LPIPS-vs-floor
+  ratio should beat the 23% improvement we got at 128px-with-287-pairs.
+  A relative improvement of 30-35% (LPIPS landing at 0.20-0.21) would
+  confirm the data-scaling hypothesis.
+- SSIM at 256px floor is 0.557; we'd expect exp14 SSIM around 0.72-0.76.
+- **Visual shape complexity**: this is the headline question. The
+  oversimplified-shapes failure mode should diminish with 3.5× more shape
+  variants and 4× more pixels per shape.
+
+If exp14 still has shape-simplicity issues, that's the trigger to
+implement exp16 (GAN aux). Otherwise, exp14 is plausibly the
+"best-current-recipe" run we'll show off.
 
 ---
 

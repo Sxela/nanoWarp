@@ -117,6 +117,15 @@ def parse_args():
                    help="Comma-separated VGG16 layer indices for content + style loss. "
                         "Defaults follow fastai/Johnson (after relu2_2, relu3_3, relu4_3). "
                         "Earlier layers capture low-level texture; later layers capture semantic style.")
+    p.add_argument("--aug-resize-scale", type=float, default=1.10,
+                   help="Intermediate resize ratio in PairedImageAugment before random crop. "
+                        "1.10 = 10%% extra room (default, conservative). 1.5-2.0 = aggressive zoom-crop, "
+                        "useful when source images are high-resolution (e.g. 1024px) since the default "
+                        "throws away most source detail. Higher values give more crop variation per pair.")
+    p.add_argument("--aug-scale-jitter", type=float, default=0.10,
+                   help="Affine scale jitter range applied to the (already resized) intermediate. "
+                        "Default 0.10 = ±10%% scale variation. Increase to 0.15-0.20 for more zoom variation "
+                        "when training data is plentiful (e.g. 1k+ pairs).")
     p.add_argument("--prediction-type", choices=["eps", "v"], default="eps",
                    help="Diffusion only. Ignored when --method flow.")
     p.add_argument("--source-dropout", type=float, default=0.0)
@@ -223,6 +232,8 @@ def main():
         train_split=args.train_split,
         val_split=args.val_split,
         color_space=args.color_space,
+        aug_resize_scale=args.aug_resize_scale,
+        aug_scale_jitter=args.aug_scale_jitter,
     )
     dl_kwargs: dict = dict(batch_size=args.batch_size, num_workers=args.num_workers)
     if args.num_workers > 0:

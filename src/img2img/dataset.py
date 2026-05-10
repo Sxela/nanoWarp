@@ -185,10 +185,17 @@ def build_train_val_datasets(
     train_split: str | None = None,
     val_split: str | None = None,
     color_space: str = "srgb",
+    aug_resize_scale: float = 1.10,
+    aug_scale_jitter: float = 0.10,
 ):
+    aug_cfg = AugmentConfig(
+        image_size=image_size,
+        resize_min_scale=aug_resize_scale,
+        scale_jitter=aug_scale_jitter,
+    )
     train_ds = PairedImageDataset(
         train_root,
-        augment=PairedImageAugment(AugmentConfig(image_size=image_size)),
+        augment=PairedImageAugment(aug_cfg),
         split=train_split,
         color_space=color_space,
     )
