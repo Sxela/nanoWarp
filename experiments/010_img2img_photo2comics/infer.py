@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.img2img import Img2ImgDiffusionUNet, PairedImageDataset
+from src.img2img.colorspace import linear_to_srgb
 from src.img2img.diffusion import DiffusionConfig, GaussianImageDiffusion
 from src.img2img.flow import FlowConfig, RectifiedImageFlow
 from src.img2img.render import save_inference_panel, save_progress_strip
@@ -49,6 +50,7 @@ def main():
     train_cfg = ckpt.get("config", {})
     attn_res_str = train_cfg.get("attn_resolutions", "8")
     attn_res = tuple(int(x) for x in str(attn_res_str).split(",") if x.strip())
+    color_space = train_cfg.get("color_space", "srgb")
     model = Img2ImgDiffusionUNet(
         model_ch=train_cfg.get("model_ch", 64),
         pretrained_source_encoder=False,
@@ -57,6 +59,7 @@ def main():
         upsample_type=train_cfg.get("upsample_type", "resize_conv"),
         attn_resolutions=attn_res,
         image_size=train_cfg.get("image_size", 128),
+        color_space=color_space,
     ).to(device)
     state_key = "ema_model" if args.use_ema and "ema_model" in ckpt else "model"
     model.load_state_dict(ckpt[state_key])
@@ -65,9 +68,12 @@ def main():
     diffusion, method_cfg, method = build_method_from_ckpt(ckpt, device)
     print(f"loaded method={method} method_cfg={method_cfg.__dict__}")
 
-    ds = PairedImageDataset(args.data_root)
+    ds = PairedImageDataset(args.data_root, color_space=color_space)
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     image_size = train_cfg.get("image_size", 128)
+
+    def to_display(x: torch.Tensor) -> torch.Tensor:
+        return linear_to_srgb(x).clamp(0, 1) if color_space == "linear_rgb" else x
 
     for batch_idx, batch in enumerate(dl):
         if batch_idx >= args.limit_batches:
@@ -80,8 +86,8 @@ def main():
             sample_steps=args.sample_steps,
             log_every=args.progress_every,
         )
-        save_inference_panel(source, samples, outdir / f"infer_panel_{batch_idx:03d}.png")
-        save_progress_strip(frames, outdir / f"infer_progress_{batch_idx:03d}.png")
+        save_inference_panel(to_display(source), to_display(samples), outdir / f"infer_panel_{batch_idx:03d}.png")
+        save_progress_strip([to_display(f) for f in frames], outdir / f"infer_progress_{batch_idx:03d}.png")
         print(f"saved inference artifacts for batch {batch_idx} to {outdir} using {args.sample_steps} sampling steps")
 
 

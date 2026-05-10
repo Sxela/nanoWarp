@@ -8,6 +8,8 @@ from torch import nn
 import torch.nn.functional as F
 from torch.hub import load_state_dict_from_url
 
+from .colorspace import linear_to_srgb
+
 
 RESNET18_URL = "https://download.pytorch.org/models/resnet18-f37072fd.pth"
 
@@ -262,10 +264,13 @@ class Img2ImgDiffusionUNet(nn.Module):
         upsample_type: str = "resize_conv",
         attn_resolutions: tuple[int, ...] = (8,),
         image_size: int = 128,
+        color_space: str = "srgb",
     ):
         super().__init__()
         if upsample_type not in ("resize_conv", "pixel_shuffle"):
             raise ValueError(f"upsample_type must be 'resize_conv' or 'pixel_shuffle', got {upsample_type!r}")
+        if color_space not in ("srgb", "linear_rgb"):
+            raise ValueError(f"color_space must be 'srgb' or 'linear_rgb', got {color_space!r}")
         if not use_source_encoder:
             source_in_stem = True
         self.use_source_encoder = use_source_encoder
@@ -273,6 +278,7 @@ class Img2ImgDiffusionUNet(nn.Module):
         self.upsample_type = upsample_type
         self.attn_resolutions = tuple(sorted(set(int(r) for r in attn_resolutions)))
         self.image_size = image_size
+        self.color_space = color_space
         if use_source_encoder:
             self.source_encoder = SourceEncoder(
                 in_ch=3,
@@ -360,7 +366,10 @@ class Img2ImgDiffusionUNet(nn.Module):
         x0 = self.in_conv(stem_input)
 
         if self.use_source_encoder:
-            src_feats = self.source_encoder(source)
+            # Source encoder is ImageNet-pretrained ResNet18 → expects sRGB input.
+            # Convert from linear RGB at the boundary if we're training in linear.
+            encoder_input = linear_to_srgb(source).clamp(0, 1) if self.color_space == "linear_rgb" else source
+            src_feats = self.source_encoder(encoder_input)
             h1 = self.fuse1(self.down1(x0, t_emb), src_feats[0])
             if self.attn1 is not None:
                 h1 = self.attn1(h1)

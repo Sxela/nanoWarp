@@ -8,6 +8,7 @@ import torch
 from torch.utils.data import DataLoader
 
 from src.img2img import IdentityPairedAugment, Img2ImgDiffusionUNet, PairedImageDataset
+from src.img2img.colorspace import linear_to_srgb
 from src.img2img.diffusion import DiffusionConfig, GaussianImageDiffusion
 from src.img2img.flow import FlowConfig, RectifiedImageFlow
 from src.img2img.metrics import ValidationMetrics
@@ -57,6 +58,7 @@ def main():
     train_cfg = ckpt.get("config", {})
     attn_res_str = train_cfg.get("attn_resolutions", "8")
     attn_res = tuple(int(x) for x in str(attn_res_str).split(",") if x.strip())
+    color_space = train_cfg.get("color_space", "srgb")
     model = Img2ImgDiffusionUNet(
         model_ch=train_cfg.get("model_ch", 64),
         pretrained_source_encoder=False,
@@ -65,6 +67,7 @@ def main():
         upsample_type=train_cfg.get("upsample_type", "resize_conv"),
         attn_resolutions=attn_res,
         image_size=train_cfg.get("image_size", 128),
+        color_space=color_space,
     ).to(device)
     state_key = "ema_model" if args.use_ema and "ema_model" in ckpt else "model"
     model.load_state_dict(ckpt[state_key])
@@ -74,11 +77,21 @@ def main():
     print(f"loaded method={method} method_cfg={method_cfg.__dict__}")
     metrics_fn = ValidationMetrics(device)
 
-    ds = PairedImageDataset(args.data_root, augment=IdentityPairedAugment(image_size=args.image_size), split=args.split)
+    ds = PairedImageDataset(
+        args.data_root,
+        augment=IdentityPairedAugment(image_size=args.image_size),
+        split=args.split,
+        color_space=color_space,
+    )
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
 
     high_t_min = max(0, min(args.high_t_min, method_cfg.timesteps - 1))
     high_t_max = max(high_t_min, min(args.high_t_max, method_cfg.timesteps - 1))
+
+    def to_display(x: torch.Tensor) -> torch.Tensor:
+        # Metrics + panels live in sRGB so numbers are comparable across runs
+        # regardless of training color space.
+        return linear_to_srgb(x).clamp(0, 1) if color_space == "linear_rgb" else x
 
     losses = []
     ssim_vals = []
@@ -119,20 +132,21 @@ def main():
                 x0_hat_high, _ = diffusion.predict_pair(x_t_high, t_high, model_out_high)
                 diag_label = f"x0_hat_t={int(t_high[0].item())}-{int(t_high[-1].item())}"
 
-            metric_vals = metrics_fn.compute(samples, target)
+            metric_vals = metrics_fn.compute(to_display(samples), to_display(target))
             ssim_vals.append(metric_vals["ssim"])
             lpips_vals.append(metric_vals["lpips"])
 
             save_val_panel(
-                source,
-                target,
-                samples,
-                x0_hat_high,
+                to_display(source),
+                to_display(target),
+                to_display(samples),
+                to_display(x0_hat_high),
                 outdir / f"val_panel_{batch_idx:03d}.png",
                 high_t_label=diag_label,
             )
             if args.save_progress_strip:
-                save_progress_strip(frames, outdir / f"val_progress_{batch_idx:03d}.png")
+                disp_frames = [to_display(f) for f in frames]
+                save_progress_strip(disp_frames, outdir / f"val_progress_{batch_idx:03d}.png")
             panels_written += 1
         else:
             samples, _frames = diffusion.sample(
@@ -142,7 +156,7 @@ def main():
                 sample_steps=args.sample_steps,
                 log_every=None,
             )
-            metric_vals = metrics_fn.compute(samples, target)
+            metric_vals = metrics_fn.compute(to_display(samples), to_display(target))
             ssim_vals.append(metric_vals["ssim"])
             lpips_vals.append(metric_vals["lpips"])
 

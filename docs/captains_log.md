@@ -355,6 +355,63 @@ This is a useful diagnostic to repeat after each model change to see whether
 new architecture options actually exploit the data we have or just reshape
 the gap.
 
+**Same test on exp08-lpips (encoder on, 2026-05-10 evening):**
+
+| metric | exp08-noenc train | val | gap | exp08-lpips train | val | gap |
+|---|---:|---:|---:|---:|---:|---:|
+| mean_loss | 0.00494 | 0.00532 | +7.7% | 0.00488 | 0.00558 | +14% |
+| SSIM ↑ | 0.7424 | 0.7344 | −1.1% | 0.7253 | 0.7194 | −0.8% |
+| **LPIPS ↓** | **0.1443** | **0.1587** | **+10.0%** | **0.1366** | **0.1516** | **+11.0%** |
+
+Key finding: **the encoder does not close the train-val gap.** Both models
+have the same ~10% LPIPS generalization gap. The encoder shifts *both* train
+and val LPIPS down by ~5% uniformly — it's a baseline-shift effect, not a
+generalization effect.
+
+**Reframe:**
+- Encoder priors = ~5% LPIPS baseline shift across the board.
+- 10% train-val LPIPS gap = data-scale tax that applies to both architectures
+  equally.
+- More paired data would help both models, not just no-encoder.
+- SSIM is essentially saturated at this scale (~0.72-0.74 for both); the
+  action is on perceptual quality.
+- exp08-noenc actually has *slightly better SSIM* than exp08-lpips on both
+  splits — the encoder pushes toward "ImageNet-feature-aligned texture" at
+  small cost to pixel-level structural fidelity.
+
+**For exp10**: attention's job is to recover the ~5% baseline shift without
+external pretraining. Generalization gap is data-bound either way.
+
+**Source-as-prediction floor (added 2026-05-10 evening):**
+
+What you'd score on val/train if you literally output the source photo as
+the predicted target. Any conditional model has to beat this.
+
+| split | SSIM ↑ | LPIPS ↓ |
+|---|---:|---:|
+| train (287 pairs) | 0.6096 | 0.1976 |
+| val (50 pairs) | 0.6168 | 0.1987 |
+
+Reframed model performance as relative improvement over the floor:
+
+| model | val SSIM | over floor | val LPIPS | over floor |
+|---|---:|---:|---:|---:|
+| floor | 0.617 | — | 0.199 | — |
+| exp08-lpips | 0.719 | +17% | **0.152** | **−24%** |
+| exp08-noenc | 0.734 | +19% | 0.159 | −20% |
+| exp10 (step 20k) | **0.736** | **+19%** | 0.153 | −23% |
+
+Useful frames this gives us:
+- **The floors are nearly identical across splits** (0.198 vs 0.199 LPIPS),
+  so our train-val gap isn't driven by val being structurally weirder.
+- **Our absolute wins are modest** — best model is ~25% better than
+  "do nothing" on LPIPS and ~20% better on SSIM. Plenty of headroom.
+- **SSIM has less headroom than LPIPS** because source≈target structurally
+  already gives SSIM ≈ 0.62. Future architecture improvements should be
+  measured primarily on LPIPS.
+- **The encoder's "+5% baseline shift"** = about a quarter of the total
+  improvement-over-floor any model achieves. Not tiny.
+
 ### DataLoader perf (added 2026-05-10)
 
 Default `--num-workers` bumped from 0 to 4. With `num_workers > 0` we
@@ -475,7 +532,7 @@ What this tells us:
 (`--upsample-type pixel_shuffle`) for future tasks where the trade-off may
 flip (e.g. higher resolution, no aux loss).
 
-### exp10 — multi-scale attention + bf16 on top of exp08-noenc — PLANNED (run on second VM)
+### exp10 — multi-scale attention + bf16 on top of exp08-noenc — RUNNING (step 20k/30k snapshot validated)
 
 Hypothesis: multi-scale self-attention can replace the perceptual priors that
 exp08-noenc lost when we dropped the ImageNet encoder. If true, we get a
@@ -556,10 +613,90 @@ Comparison table to fill in once results land:
 |  5k |  |  |  |  |
 | 10k |  |  |  |  |
 | 15k |  |  |  |  |
-| 20k | 0.734 |  | 0.159 |  |
-| 30k | — |  | — |  |
+| **20k** | **0.734** | **0.736** | **0.159** | **0.153** |
+| 30k | — | (in progress) | — | (in progress) |
 
-### exp11 / exp12 — conditional plan based on exp10 outcome
+**Step-20k snapshot — Scenario A confirmed.**
+
+Three-way comparison at step 20k (val split, full 13 batches × bs=4 = 52 examples,
+EMA + 20-step Euler):
+
+| metric | exp08-lpips (mc=64, encoder, no attn) | exp08-noenc (mc=88, no encoder, no attn) | **exp10 (mc=88, no encoder, attn 8,16,32, bf16)** |
+|---|---:|---:|---:|
+| mean_loss | 0.0056 | 0.0053 | 0.0054 |
+| **SSIM ↑** | 0.719 | 0.734 | **0.736** |
+| **LPIPS ↓** | **0.152** | 0.159 | **0.153** |
+
+- SSIM: exp10 beats exp08-lpips by +2.4%, ties exp08-noenc.
+- LPIPS: exp10 within noise of exp08-lpips (+0.7%, well below the ~10%
+  data-bound generalization gap).
+
+**Multi-scale attention recovered the ~5% LPIPS baseline shift that
+the ImageNet encoder was providing — without any external pretraining.**
+exp08-noenc's LPIPS was 0.159; exp10's is 0.153, closing the encoder gap.
+
+This is a real architectural win: encoder-free model with multi-scale
+attention now matches or beats the encoder-based baseline. We can ship
+a smaller, simpler, encoder-free architecture going forward. Visual
+panels at step 20k show recognizable anime stylization comparable to
+exp08-lpips.
+
+This is at step 20k of 30k; the final number could push exp10 past
+exp08-lpips on both metrics rather than just match.
+
+### exp11 — exp10 + linear RGB — PLANNED (Scenario A activated)
+
+Adds physically-correct linear-RGB training on top of the confirmed-best
+exp10 architecture (no encoder, mc=88, attn 8,16,32, bf16, FM, LPIPS 0.2,
+dropout 0.15).
+
+The hypothesis: FM's interpolant `x_t = (1-t)·source + t·target + σ·noise`
+and bilinear upsampling are physically meaningful operations on light
+intensity, which sRGB does not represent linearly. Operating in linear RGB
+should clean up off-path drift and slightly sharpen edges/colors. We expect
+2-5% LPIPS improvement.
+
+Wired via `--color-space linear_rgb`. Conversions happen at boundaries:
+- **Dataset**: PIL loads sRGB, conversion to linear after PIL augmentation
+  ([dataset.py L160-L166](../src/img2img/dataset.py#L160-L166)).
+- **Source encoder** (when used): linear → sRGB before the ResNet18 forward
+  ([model.py L344-L347](../src/img2img/model.py#L344-L347)). exp11 uses
+  `--no-source-encoder` so this branch is inactive but kept correct.
+- **LPIPS aux**: trainer wraps the LPIPS network so it always sees sRGB
+  inputs.
+- **Panels**: trainer / validate.py / infer.py convert linear → sRGB at
+  the display boundary so panels are display-correct and metrics are
+  comparable across runs.
+
+Validation always reports SSIM/LPIPS in sRGB regardless of training color
+space, so exp11 numbers compare directly to exp08-lpips/exp10/etc.
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --steps 30000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 88 `
+    --attn-resolutions "8,16,32" `
+    --amp bf16 `
+    --color-space linear_rgb `
+    --source-dropout 0.15 --lpips-weight 0.2 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --checkpoint-every 1000 --sample-panel-steps 20 `
+    --num-workers 8 `
+    --wandb --wandb-project nanoWarp `
+    --wandb-run-name exp11_linrgb_noenc_attn832_bf16_mc88_30k `
+    --wandb-tags "flow,no-encoder,lpips,attn-multiscale,bf16,linear-rgb,exp11" `
+    --outdir out/exp11_linrgb_noenc_attn832_bf16_mc88_30k
+```
+
+Predictions:
+- LPIPS: -2 to -5% vs exp10 (0.146-0.150 range vs exp10's 0.153)
+- SSIM: tiny shift, probably +/-1% (linear vs sRGB SSIM differences mostly
+  cancel since we report in sRGB).
+- Visual: cleaner palette in mid-trajectory frames, less weird color drift
+  along the FM path.
+
+### exp11 / exp12 — conditional plan based on exp10 outcome (now Scenario A — linear RGB chosen above)
 
 Spec ahead of time so the next pair of experiments is unambiguous.
 

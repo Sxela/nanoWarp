@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 
 from src.img2img import EMA, Img2ImgDiffusionUNet, build_train_val_datasets
+from src.img2img.colorspace import linear_to_srgb
 from src.img2img.diffusion import DiffusionConfig, GaussianImageDiffusion
 from src.img2img.flow import FlowConfig, RectifiedImageFlow
 from src.img2img.render import save_val_panel
@@ -87,6 +88,11 @@ def parse_args():
                    help="Mixed-precision training. bf16 wraps forward+loss in autocast (fp32 master weights "
                         "preserved by AdamW). Unlocks FlashAttention on Ampere+/Ada GPUs and ~half activation "
                         "memory. Default off for fp32 baseline reproducibility.")
+    p.add_argument("--color-space", choices=["srgb", "linear_rgb"], default="srgb",
+                   help="Color space the model trains in. srgb (default) = standard PIL/PNG behavior. "
+                        "linear_rgb = undo sRGB gamma at the dataset boundary so FM interpolation, noise, "
+                        "and bilinear upsampling are physically correct. ImageNet encoder + LPIPS aux + "
+                        "panel saves auto-convert linear -> sRGB at their boundaries.")
     p.add_argument("--freeze-source-encoder", choices=["none", "stem", "partial", "all"], default="partial",
                    help="Which ResNet stages of the source encoder to freeze. "
                         "stem=conv1+bn1; partial=stem+layer1 (current default); all=stem+layer1+layer2+layer3+layer4. "
@@ -197,6 +203,7 @@ def main():
         image_size=args.image_size,
         train_split=args.train_split,
         val_split=args.val_split,
+        color_space=args.color_space,
     )
     dl_kwargs: dict = dict(batch_size=args.batch_size, num_workers=args.num_workers)
     if args.num_workers > 0:
@@ -218,8 +225,9 @@ def main():
         upsample_type=args.upsample_type,
         attn_resolutions=attn_resolutions,
         image_size=args.image_size,
+        color_space=args.color_space,
     ).to(device)
-    print(f"use_source_encoder={use_source_encoder} model_ch={args.model_ch} unet_channels={model.unet_channels} upsample={args.upsample_type} attn_resolutions={model.attn_resolutions}")
+    print(f"use_source_encoder={use_source_encoder} model_ch={args.model_ch} unet_channels={model.unet_channels} upsample={args.upsample_type} attn_resolutions={model.attn_resolutions} color_space={args.color_space}")
     print(f"freeze_source_encoder={args.freeze_source_encoder} stages={freeze_stages}")
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -238,7 +246,17 @@ def main():
     opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=args.lr)
     aux_lpips = None
     if args.lpips_weight > 0:
-        aux_lpips = LearnedPerceptualImagePatchSimilarity(net_type="squeeze", normalize=True).to(device)
+        raw_lpips = LearnedPerceptualImagePatchSimilarity(net_type="squeeze", normalize=True).to(device)
+        if args.color_space == "linear_rgb":
+            class _LpipsLinearWrapper(torch.nn.Module):
+                def __init__(self, inner):
+                    super().__init__()
+                    self.inner = inner
+                def forward(self, a, b):
+                    return self.inner(linear_to_srgb(a).clamp(0, 1), linear_to_srgb(b).clamp(0, 1))
+            aux_lpips = _LpipsLinearWrapper(raw_lpips)
+        else:
+            aux_lpips = raw_lpips
 
     start_step = 1
     if args.resume:
@@ -327,12 +345,19 @@ def main():
                 )
             samples_panel = samples_panel.float()
             model.train()
+            if args.color_space == "linear_rgb":
+                src_disp = linear_to_srgb(source).clamp(0, 1)
+                tgt_disp = linear_to_srgb(target).clamp(0, 1)
+                samples_disp = linear_to_srgb(samples_panel).clamp(0, 1)
+                x0_disp = linear_to_srgb(x0_hat.float()).clamp(0, 1)
+            else:
+                src_disp, tgt_disp, samples_disp, x0_disp = source, target, samples_panel, x0_hat
             panel_path = outdir / f"panel_step_{step:06d}.png"
             save_val_panel(
-                source,
-                target,
-                samples_panel,
-                x0_hat,
+                src_disp,
+                tgt_disp,
+                samples_disp,
+                x0_disp,
                 panel_path,
                 high_t_label="x0_hat_random_t",
             )

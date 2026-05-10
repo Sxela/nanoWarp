@@ -10,6 +10,8 @@ from torch.utils.data import Dataset
 from torchvision.transforms import functional as TF
 from torchvision.transforms.functional import InterpolationMode
 
+from .colorspace import srgb_to_linear
+
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 
@@ -123,12 +125,16 @@ class PairedImageDataset(Dataset):
         target_dir: str = "target",
         augment: PairedImageAugment | None = None,
         split: str | None = None,
+        color_space: str = "srgb",
     ):
+        if color_space not in ("srgb", "linear_rgb"):
+            raise ValueError(f"color_space must be 'srgb' or 'linear_rgb', got {color_space!r}")
         self.root = Path(root)
         base_root = self.root / split if split and (self.root / split).exists() else self.root
         self.source_root = base_root / source_dir
         self.target_root = base_root / target_dir
         self.augment = augment or PairedImageAugment()
+        self.color_space = color_space
 
         src_files = _list_images(self.source_root)
         tgt_files = _list_images(self.target_root)
@@ -146,11 +152,19 @@ class PairedImageDataset(Dataset):
         tgt = _load_rgb(tgt_path)
 
         src_aug, tgt_aug, src_geom = self.augment(src, tgt)
+        # PIL augmentations operate on sRGB. Convert to linear AFTER aug, on the tensor.
+        src_t = TF.to_tensor(src_aug)
+        tgt_t = TF.to_tensor(tgt_aug)
+        src_geom_t = TF.to_tensor(src_geom)
+        if self.color_space == "linear_rgb":
+            src_t = srgb_to_linear(src_t)
+            tgt_t = srgb_to_linear(tgt_t)
+            src_geom_t = srgb_to_linear(src_geom_t)
         return {
             "key": key,
-            "source": TF.to_tensor(src_aug),
-            "target": TF.to_tensor(tgt_aug),
-            "source_geom": TF.to_tensor(src_geom),
+            "source": src_t,
+            "target": tgt_t,
+            "source_geom": src_geom_t,
         }
 
 
@@ -170,8 +184,19 @@ def build_train_val_datasets(
     image_size: int = 128,
     train_split: str | None = None,
     val_split: str | None = None,
+    color_space: str = "srgb",
 ):
-    train_ds = PairedImageDataset(train_root, augment=PairedImageAugment(AugmentConfig(image_size=image_size)), split=train_split)
+    train_ds = PairedImageDataset(
+        train_root,
+        augment=PairedImageAugment(AugmentConfig(image_size=image_size)),
+        split=train_split,
+        color_space=color_space,
+    )
     resolved_val_root = val_root or train_root
-    val_ds = PairedImageDataset(resolved_val_root, augment=IdentityPairedAugment(image_size=image_size), split=val_split)
+    val_ds = PairedImageDataset(
+        resolved_val_root,
+        augment=IdentityPairedAugment(image_size=image_size),
+        split=val_split,
+        color_space=color_space,
+    )
     return train_ds, val_ds
