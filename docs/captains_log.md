@@ -294,23 +294,91 @@ Final val (full 13 batches × bs=4 = 52 examples, EMA + 20-step Euler):
 | mean_loss | — | 0.0053 | — |
 | **SSIM ↑** | 0.719 | **0.734** | **+2.1%** |
 | **LPIPS ↓** | 0.152 | **0.159** | **+4.3%** worse |
-| trainable params | 31.6M | 23.7M | −25% |
-| total params | 42.7M | 23.7M | −44% |
+| total params | 42.7M | 43.9M | +3% (matched) |
+| trainable params | 31.6M | **43.9M** | **+39%** (no-enc has more) |
+| frozen params | 11.2M | 0 | — |
 
-**Mixed result — split decision.**
-- SSIM win: pure-pixel UNet preserves structure better.
-- LPIPS loss: ImageNet pretrained encoder was contributing real perceptual
-  priors. LPIPS itself uses ImageNet-trained SqueezeNet, so part of this gap
-  may be "encoder features happen to align with what LPIPS rewards."
+**The comparison is confounded by pretraining.**
 
-**Conclusion:**
-- For best quality so far: exp08-lpips (encoder on). The encoder earns its
-  keep on LPIPS specifically.
-- For deployment-size-constrained variants: exp08-noenc is ~2× smaller total
-  for ~3% perceptual cost. Real option if size matters.
-- **Open question for exp10**: can multi-scale attention rescue no-encoder's
-  perceptual gap? If yes → simpler, smaller architecture wins overall. exp10
-  is built on exp08-noenc to test this.
+The encoder's 11.2M frozen params are not "free architectural advantage" —
+they encode ~1.28M ImageNet images × ~90 epochs of pretraining. That's
+roughly **~115M training-example exposures** baked into those weights,
+versus our paired-training budget of **20k × bs=4 = 80k examples**. Three
+orders of magnitude more pretraining compute on the encoder side.
+
+So the right reading of the result is **not** "encoder beat no-encoder at
+fair size." It's "**11.2M ImageNet-pretrained params beat 11.2M extra
+randomly-initialised params trained on 80k examples**." Given the data-scale
+asymmetry, the surprise is that no-encoder closed *most* of the gap with
+zero priors.
+
+**Reframed conclusion:**
+- The encoder's perceptual edge is mostly **amortised prior compute**, not
+  an intrinsic architectural advantage of "having a separate encoder branch".
+- At our current paired-data scale (287 pairs, 20k steps), pretraining priors
+  cheaply buy ~3% LPIPS.
+- For deployment / size-constrained scenarios: exp08-noenc is genuinely
+  competitive — losing only ~3% LPIPS while being half the total size and
+  having no external pretraining dependency.
+- **Open question for exp10** (no-encoder + multi-scale attention): attention
+  is a stronger inductive bias than conv, so it may close the prior-compute
+  gap faster than a conv-only UNet can. Genuinely unclear what'll happen.
+
+**Better-controlled future ablations** once the data-scale framing is clear:
+- Train no-encoder for 100k+ steps to see if the gap closes with more
+  paired-data exposure.
+- Self-supervised pretraining of the no-encoder UNet's stem on a larger
+  unpaired image set (e.g. ImageNet-100, COCO, LAION) before paired
+  fine-tuning. Closer to a fair architectural comparison.
+- Significantly larger paired dataset (1k-10k pairs) — the strongest
+  intervention available.
+
+**Train-val gap test (added 2026-05-10 evening):**
+
+Ran validate.py twice on the exp08-noenc final EMA — once with `--split train`,
+once with `--split val`. Same model, same sampler, same batch count (52 each).
+
+| metric | train | val | gap |
+|---|---:|---:|---:|
+| mean_loss | 0.00494 | 0.00532 | val +7.7% worse |
+| SSIM ↑ | 0.7424 | 0.7344 | val −1.1% worse |
+| **LPIPS ↓** | **0.1443** | **0.1587** | **val +10% worse** |
+
+Reading: the model **is not memorizing structure** (SSIM gap tiny), but **is
+moderately overfitting perceptual features** (LPIPS gap 10%). Train SSIM is
+only 0.74 — far from "fully fit the training set" — so we're also somewhat
+capacity-limited on structural features. **Both more data and better
+architecture would help, with data being the stronger lever for perceptual
+quality.**
+
+This is a useful diagnostic to repeat after each model change to see whether
+new architecture options actually exploit the data we have or just reshape
+the gap.
+
+### DataLoader perf (added 2026-05-10)
+
+Default `--num-workers` bumped from 0 to 4. With `num_workers > 0` we
+auto-enable `pin_memory` (CUDA only), `persistent_workers=True`, and
+`prefetch_factor=2`. `.to(device, non_blocking=True)` on the data tensors.
+
+Bench on the 4090 at bs=4 / 128px (`PairedImageDataset` with full augment):
+
+| config | ms / batch | speedup |
+|---|---:|---:|
+| baseline (workers=0) | 83.0 | 1.0× |
+| pin_memory + workers=0 | 272.8 | **0.3× — slower** |
+| workers=2 | 139.5 | 0.6× |
+| workers=4 (new default) | 53.6 | 1.5× |
+| **workers=8** | **31.1** | **2.7×** |
+
+Findings:
+- **Footgun**: `pin_memory=True` with `num_workers=0` is *much slower* on
+  Windows than no-pin baseline (3× slower). The trainer auto-disables
+  pin_memory at workers=0.
+- workers=8 brings batch loading down to ~step time (~30 ms). At that point
+  GPU is the bottleneck again, which is what we want.
+- Long runs should pass `--num-workers 8` explicitly (default 4 is the
+  conservative cross-machine default).
 
 ### Weights & Biases (added 2026-05-10)
 
@@ -370,6 +438,7 @@ python scripts/train.py img2img-v1 data/photo2anime `
     --source-dropout 0.15 --lpips-weight 0.2 `
     --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
     --checkpoint-every 1000 --sample-panel-steps 20 `
+    --num-workers 8 `
     --wandb --wandb-project nanoWarp `
     --wandb-run-name exp09_pixshuf_lpips_mc56_20k `
     --wandb-tags "flow,encoder-on,lpips,pixel-shuffle,exp09" `
@@ -444,6 +513,7 @@ python scripts/train.py img2img-v1 data/photo2anime `
     --source-dropout 0.15 --lpips-weight 0.2 `
     --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
     --checkpoint-every 1000 --sample-panel-steps 20 `
+    --num-workers 8 `
     --wandb --wandb-project nanoWarp `
     --wandb-run-name exp10_noenc_attn832_bf16_mc88_30k `
     --wandb-tags "flow,no-encoder,lpips,attn-multiscale,bf16,exp10" `
@@ -488,3 +558,60 @@ Comparison table to fill in once results land:
 | 15k |  |  |  |  |
 | 20k | 0.734 |  | 0.159 |  |
 | 30k | — |  | — |  |
+
+### exp11 / exp12 — conditional plan based on exp10 outcome
+
+Spec ahead of time so the next pair of experiments is unambiguous.
+
+**Scenario A — exp10 WINS (no-enc + multi-scale attn closes or beats LPIPS).**
+Attention replaces the ImageNet priors. Push on the rest of the OpenAI UNet
+ladder + orthogonal axes.
+
+- **exp11** = exp10 + linear RGB. Physically correct interpolation in FM
+  (`x_t = (1-t)·source + t·target` only matches light arithmetic in linear
+  space). ~30 lines (sRGB↔linear conversions at dataset / LPIPS / panel
+  boundaries). Free win on FM correctness.
+- **exp12** = exp11 + FiLM time injection + 2 ResBlocks per level. Finishes
+  Path C (the OpenAI UNet upgrade ladder). FiLM is ~5 lines (replace
+  additive `time_proj` with a `(scale, shift)` linear). 2 ResBlocks per
+  level is the standard DDPM/SD pattern.
+
+**Scenario B — exp10 LOSES (encoder priors still required).**
+Attention isn't enough to replace the encoder at this data scale. The
+question becomes: does attention help *on top of* the encoder?
+
+- **exp11** = exp08-lpips + multi-scale attention(8,16,32) + bf16
+  (encoder ON, mc=64). Single-variable change vs the proven best. The
+  Option A we considered earlier. Tests "does attention help a model
+  that already has good priors?"
+- **exp12** = (winner of exp08-lpips vs exp11) + linear RGB. Same physical-
+  correctness motivation as Scenario A's exp11.
+
+**Scenario C — exp10 MIXED (better SSIM, still worse LPIPS).**
+Attention does real structural work but doesn't replace prior compute.
+Combine the wins.
+
+- **exp11** = exp08-lpips + multi-scale attention(8,16,32) + bf16
+  (same as Scenario B's exp11). Tests if SSIM gain stacks with encoder's
+  LPIPS edge.
+- **exp12** = exp11 + linear RGB.
+
+**Things worth running regardless of exp10's outcome:**
+- `--lpips-weight 0.4` ablation on the current best architecture.
+  exp08-lpips's curve was still improving at 20k; pushing harder might
+  unlock more. Single-flag change.
+- **Source-as-prediction baseline metric.** Compute mean SSIM/LPIPS of
+  `source` vs `target` on val (no model, just the metric). 5-line script.
+  Tells us the floor any conditional model has to beat. Without this we
+  can't tell if 0.152 LPIPS is "good" or "barely above do-nothing."
+- `--lpips-weight 0.0` ablation **at 30k steps with attention + bf16**.
+  Tests whether LPIPS aux is still load-bearing once attention is in the
+  model. If so, attention does the perceptual work LPIPS was doing, and
+  we can drop the LPIPS computational overhead.
+
+| if exp10... | exp11 | exp12 |
+|---|---|---|
+| wins    | + linear RGB                   | + FiLM + 2 ResBlocks             |
+| loses   | + attn on encoder-on baseline  | + linear RGB on the winner       |
+| mixed   | + attn on encoder-on baseline  | + linear RGB on exp11            |
+| any     | source-baseline metric, lpips=0.4 ablation | ↑ |
