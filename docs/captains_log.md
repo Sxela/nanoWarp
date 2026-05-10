@@ -207,7 +207,7 @@ Val curve across the run:
   was emerging slowly. Real flat-color stylization didn't really kick in
   until LPIPS aux was added (see exp07b+LPIPS below).
 
-### exp07b + LPIPS 0.2 — same config, perceptual aux loss added — DONE
+### exp08-lpips — exp07b config + LPIPS 0.2 (encoder still on) — DONE
 
 Same FM + freeze=all + dropout + safety nets, plus `--lpips-weight 0.2`.
 Hypothesis (from exp07b's "MSE plateaued / perceptual still climbing"
@@ -234,12 +234,27 @@ python scripts/train.py img2img-v1 data/photo2anime `
   `x0_hat` reconstruction is partly gameable through `x_t` leakage), FM's
   LPIPS target is non-gameable, so the aux signal converts directly to
   perceptual quality.
+Final val curve (vs exp07b at every checkpoint):
 
-### exp08 — drop source encoder, widen UNet, keep LPIPS — PLANNED
+| step | exp07b SSIM | **exp08-lpips SSIM** | exp07b LPIPS | **exp08-lpips LPIPS** |
+|---:|---:|---:|---:|---:|
+|  1k | 0.616 | **0.608** | 0.219 | **0.161** |
+|  5k | 0.629 | **0.678** | 0.176 | **0.148** |
+| 10k | 0.648 | **0.703** | 0.190 | **0.148** |
+| 15k | 0.691 | **0.715** | 0.166 | **0.150** |
+| 20k | 0.701 | **0.719** | 0.159 | **0.152** |
 
-Following findings from exp07b + exp07b+LPIPS:
+LPIPS aux is strictly better at every checkpoint (after step 1k where SSIM is
+within noise) and **visually much better** — the qualitative jump from
+"source + mild palette shift" to actual anime stylization that the step-2k
+panel previewed translates through to convergence. **LPIPS aux is now
+load-bearing in the recipe**; runs without it are no longer interesting.
+
+### exp08-noenc — drop source encoder, widen UNet, keep LPIPS — RUNNING (resumed from step 5k)
+
+Following findings from exp07b + exp08-lpips:
 - Encoder freezing fixed the optimizer collapse (exp05/06 → exp07b stable).
-- LPIPS aux unlocked the actual stylization (exp07b → exp07b+LPIPS).
+- LPIPS aux unlocked the actual stylization (exp07b → exp08-lpips).
 - Open question: is the (frozen) ResNet18 encoder + multiscale fuse path
   contributing useful semantic priors, or is `cat([source, x_t])` at the input
   stem already enough?
@@ -267,11 +282,15 @@ Param count: 43.9M total, all trainable (vs exp07b's 42.7M total with
 11.2M frozen). UNet widths: 88 / 176 / 352 / 352 / 704.
 
 Predictions:
-- If exp08 ≈ or > exp07b+LPIPS at step 20k → encoder was redundant given stem
-  concat + larger UNet. Smaller, simpler model wins.
-- If exp08 < exp07b+LPIPS → ImageNet semantic priors in the encoder were
+- If exp08-noenc ≈ or > exp08-lpips at step 20k → encoder was redundant given
+  stem concat + larger UNet. Smaller, simpler model wins.
+- If exp08-noenc < exp08-lpips → ImageNet semantic priors in the encoder were
   doing real work; keep it. Next move would be to test `freeze=all` with the
   *unmodified* ResNet (no fuses, just stem) to isolate the prior contribution.
+
+Run launched 2026-05-10 morning, originally killed at step ~5000, then
+resumed from `model_step_005000.pt` after `--resume` shipped. Wandb run
+continues as `exp08_noenc_lpips_mc88_20k_resumed`.
 
 ### Weights & Biases (added 2026-05-10)
 
@@ -301,8 +320,34 @@ were not logged to wandb. From exp08 onward, runs will land in the
   conditional model has to beat. Five-line script.
 - Replace `save_loss_plot` with log-y + rolling mean (now optional since
   wandb handles smoothing).
-- Trainer `--resume` support to continue from a saved checkpoint
-  (~10 lines: load model + EMA + optimizer state).
+- ~~Trainer `--resume` support to continue from a saved checkpoint.~~
+  **Done 2026-05-10.** `--resume PATH` loads model + EMA + optimizer state
+  + step number. Checkpoints (intermediate and final) now include optimizer
+  state and step. Old pre-2026-05-10 checkpoints can still be resumed but
+  AdamW moments restart fresh (warning printed). See exp08 resume command
+  in the exp08 section.
 - Latent flow matching once the pixel-space pipeline is solid.
 - Once exp08 lands: ablate `freeze=all` vs `freeze=partial` on the
   encoder-on path now that we know freeze=all is stable.
+- **exp09 — PixelShuffle upsampling.** Already wired under
+  `--upsample-type pixel_shuffle` (with ICNR init to avoid checkerboard).
+  Sub-pixel conv often produces sharper edges than resize+conv, especially
+  for image-translation tasks where iteration count is low (FM uses 4-10
+  Euler steps vs DDIM-50). The fastai UNet picked PixelShuffle for exactly
+  this reason. Caveat: each up-block grows from `channels^2 * 9` to
+  `4 * channels^2 * 9` params, so pixel_shuffle at `--model-ch 88` is
+  64.9M total (vs 43.9M for resize_conv at the same width). For
+  param-matched comparison vs exp08, run pixel_shuffle at `--model-ch 72`.
+
+  ```powershell
+  python scripts/train.py img2img-v1 data/photo2anime `
+      --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+      --method flow --flow-sigma-noise 0.05 `
+      --no-source-encoder --model-ch 72 `
+      --upsample-type pixel_shuffle `
+      --source-dropout 0.15 --lpips-weight 0.2 `
+      --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+      --checkpoint-every 1000 --sample-panel-steps 20 `
+      --wandb --wandb-tags "flow,no-encoder,lpips,pixel-shuffle,exp09" `
+      --outdir out/exp09_pixshuf_lpips_mc72_20k
+  ```

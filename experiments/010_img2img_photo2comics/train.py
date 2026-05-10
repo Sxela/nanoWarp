@@ -71,6 +71,9 @@ def parse_args():
     p.add_argument("--model-ch", type=int, default=64,
                    help="Base width of the UNet. All level widths are multiples (1x, 2x, 4x, 4x, 8x). "
                         "Default 64 = original architecture (64/128/256/256/512). 96 = 1.5x wider.")
+    p.add_argument("--upsample-type", choices=["resize_conv", "pixel_shuffle"], default="resize_conv",
+                   help="Decoder upsampler. resize_conv = nearest interp + 3x3 conv (DDPM-style, default). "
+                        "pixel_shuffle = sub-pixel conv with ICNR init (sharper edges, fastai-style).")
     p.add_argument("--freeze-source-encoder", choices=["none", "stem", "partial", "all"], default="partial",
                    help="Which ResNet stages of the source encoder to freeze. "
                         "stem=conv1+bn1; partial=stem+layer1 (current default); all=stem+layer1+layer2+layer3+layer4. "
@@ -95,6 +98,11 @@ def parse_args():
     p.add_argument("--checkpoint-every", type=int, default=0,
                    help="If >0, save model.pt every N steps (in addition to the final save). "
                         "Lets validate.py run mid-training in a parallel process.")
+    p.add_argument("--resume", default=None,
+                   help="Path to a checkpoint .pt to resume from. Loads model + EMA + optimizer state "
+                        "and continues training from the saved step (or step 1 if --resume's checkpoint "
+                        "doesn't record a step). New CLI args override the saved config; mismatched "
+                        "architecture flags will cause a state_dict load error.")
     p.add_argument("--wandb", action="store_true",
                    help="Log metrics + panels to Weights & Biases. Requires `wandb login` already done.")
     p.add_argument("--wandb-project", default="nanoWarp")
@@ -190,8 +198,9 @@ def main():
         freeze_source_stages=freeze_stages,
         source_in_stem=args.source_in_stem,
         use_source_encoder=use_source_encoder,
+        upsample_type=args.upsample_type,
     ).to(device)
-    print(f"use_source_encoder={use_source_encoder} model_ch={args.model_ch} unet_channels={model.unet_channels}")
+    print(f"use_source_encoder={use_source_encoder} model_ch={args.model_ch} unet_channels={model.unet_channels} upsample={args.upsample_type}")
     print(f"freeze_source_encoder={args.freeze_source_encoder} stages={freeze_stages}")
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -212,10 +221,25 @@ def main():
     if args.lpips_weight > 0:
         aux_lpips = LearnedPerceptualImagePatchSimilarity(net_type="squeeze", normalize=True).to(device)
 
+    start_step = 1
+    if args.resume:
+        ckpt_resume = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt_resume["model"])
+        ema.model.load_state_dict(ckpt_resume["ema_model"])
+        if "optimizer" in ckpt_resume:
+            opt.load_state_dict(ckpt_resume["optimizer"])
+            print(f"resumed optimizer state from {args.resume}")
+        else:
+            print(f"warning: {args.resume} has no saved optimizer state; AdamW moments will start fresh")
+        start_step = int(ckpt_resume.get("step", 0)) + 1
+        print(f"resumed from {args.resume} -> starting at step {start_step}")
+        if start_step > args.steps:
+            raise SystemExit(f"resume step {start_step} > --steps {args.steps}; pass a larger --steps")
+
     losses: list[float] = []
     val_history: list[float] = []
     grad_norms: list[float] = []
-    for step in range(1, args.steps + 1):
+    for step in range(start_step, args.steps + 1):
         cur_lr = lr_at(step, args, args.steps)
         for g in opt.param_groups:
             g["lr"] = cur_lr
@@ -305,6 +329,7 @@ def main():
                 {
                     "model": model.state_dict(),
                     "ema_model": ema.model.state_dict(),
+                    "optimizer": opt.state_dict(),
                     "config": vars(args),
                     "diffusion": method_cfg.__dict__,
                     "method": args.method,
@@ -318,9 +343,11 @@ def main():
         {
             "model": model.state_dict(),
             "ema_model": ema.model.state_dict(),
+            "optimizer": opt.state_dict(),
             "config": vars(args),
             "diffusion": method_cfg.__dict__,
             "method": args.method,
+            "step": args.steps,
         },
         outdir / "model.pt",
     )

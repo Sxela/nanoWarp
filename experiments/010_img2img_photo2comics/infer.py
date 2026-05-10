@@ -52,6 +52,7 @@ def main():
         pretrained_source_encoder=False,
         source_in_stem=train_cfg.get("source_in_stem", False),
         use_source_encoder=not train_cfg.get("no_source_encoder", False),
+        upsample_type=train_cfg.get("upsample_type", "resize_conv"),
     ).to(device)
     state_key = "ema_model" if args.use_ema and "ema_model" in ckpt else "model"
     model.load_state_dict(ckpt[state_key])

@@ -209,6 +209,43 @@ class Upsample(nn.Module):
         return self.op(x)
 
 
+def icnr_init(weight: torch.Tensor, scale: int = 2, init=nn.init.kaiming_normal_) -> None:
+    """ICNR (Aitken et al. 2017): initialise a sub-pixel conv so that PixelShuffle
+    produces the same output as nearest-neighbor upsampling at step 0. This is what
+    keeps PixelShuffle from emitting a checkerboard pattern early in training.
+
+    `weight` shape is (out_ch, in_ch, kH, kW) with out_ch = base_ch * scale**2.
+    """
+    out_ch, in_ch = weight.shape[:2]
+    spatial = weight.shape[2:]
+    base_ch = out_ch // (scale ** 2)
+    sub = torch.empty(base_ch, in_ch, *spatial, device=weight.device, dtype=weight.dtype)
+    init(sub)
+    sub = sub.repeat_interleave(scale ** 2, dim=0)
+    with torch.no_grad():
+        weight.copy_(sub)
+
+
+class PixelShuffleUpsample(nn.Module):
+    """Sub-pixel conv upsampling with ICNR init.
+
+    Drop-in replacement for `Upsample`: same in_ch == out_ch, 2x spatial.
+    Tends to produce sharper edges than resize+conv in image-translation tasks
+    (cf. fastai's UNet). The cost is one extra hyperparameter (the init).
+    """
+
+    def __init__(self, channels: int, scale: int = 2):
+        super().__init__()
+        self.conv = nn.Conv2d(channels, channels * (scale ** 2), 3, padding=1)
+        self.shuffle = nn.PixelShuffle(scale)
+        icnr_init(self.conv.weight, scale=scale)
+        if self.conv.bias is not None:
+            nn.init.zeros_(self.conv.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.shuffle(self.conv(x))
+
+
 class Img2ImgDiffusionUNet(nn.Module):
     """Pixel-space conditional diffusion skeleton for photo -> comics."""
 
@@ -222,12 +259,16 @@ class Img2ImgDiffusionUNet(nn.Module):
         freeze_source_stages: tuple[str, ...] = ("stem", "layer1"),
         source_in_stem: bool = False,
         use_source_encoder: bool = True,
+        upsample_type: str = "resize_conv",
     ):
         super().__init__()
+        if upsample_type not in ("resize_conv", "pixel_shuffle"):
+            raise ValueError(f"upsample_type must be 'resize_conv' or 'pixel_shuffle', got {upsample_type!r}")
         if not use_source_encoder:
             source_in_stem = True
         self.use_source_encoder = use_source_encoder
         self.source_in_stem = source_in_stem
+        self.upsample_type = upsample_type
         if use_source_encoder:
             self.source_encoder = SourceEncoder(
                 in_ch=3,
@@ -276,13 +317,14 @@ class Img2ImgDiffusionUNet(nn.Module):
         else:
             self.fuse1 = self.fuse2 = self.fuse3 = self.fuse4 = self.mid_fuse = None
 
-        self.up4 = Upsample(cm)
+        UpModule = PixelShuffleUpsample if upsample_type == "pixel_shuffle" else Upsample
+        self.up4 = UpModule(cm)
         self.dec4 = ResBlock(cm + c4, c3, time_dim * 4)
-        self.up3 = Upsample(c3)
+        self.up3 = UpModule(c3)
         self.dec3 = ResBlock(c3 + c3, c3, time_dim * 4)
-        self.up2 = Upsample(c3)
+        self.up2 = UpModule(c3)
         self.dec2 = ResBlock(c3 + c2, c2, time_dim * 4)
-        self.up1 = Upsample(c2)
+        self.up1 = UpModule(c2)
         self.dec1 = ResBlock(c2 + c1, c1, time_dim * 4)
 
         self.out_norm = nn.GroupNorm(8, c1)
