@@ -674,7 +674,7 @@ win confirmed.
 For exp11 onward: either cap at 20k–25k steps, or train to 30k but pick
 the EMA checkpoint with best val LPIPS (we have all 1k–29k checkpoints).
 
-### exp11 — exp10 + linear RGB — PLANNED (Scenario A activated)
+### exp11 — exp10 + linear RGB — DONE (essentially neutral)
 
 Adds physically-correct linear-RGB training on top of the confirmed-best
 exp10 architecture (no encoder, mc=88, attn 8,16,32, bf16, FM, LPIPS 0.2,
@@ -727,14 +727,130 @@ Notes:
   identify best-LPIPS step from the val curve. If you need finer for some
   reason, set to 2500.
 
-Predictions:
+Predictions (made before the run):
 - LPIPS: -2 to -5% vs exp10 (0.146-0.150 range vs exp10's 0.153)
-- SSIM: tiny shift, probably +/-1% (linear vs sRGB SSIM differences mostly
-  cancel since we report in sRGB).
-- Visual: cleaner palette in mid-trajectory frames, less weird color drift
-  along the FM path.
+- SSIM: tiny shift, probably +/-1%.
+- Visual: cleaner palette in mid-trajectory frames.
 
-### exp11 / exp12 — conditional plan based on exp10 outcome (now Scenario A — linear RGB chosen above)
+**Actual val curve:**
+
+| step | exp10 SSIM | exp11 SSIM | exp10 LPIPS | exp11 LPIPS |
+|---:|---:|---:|---:|---:|
+|  5k | — | 0.686 | — | 0.160 |
+| 10k | — | 0.713 | — | 0.154 |
+| 15k | — | 0.725 | — | 0.153 |
+| 20k | 0.736 | 0.732 | 0.153 | 0.154 |
+| 30k | 0.740 | 0.737 | 0.158 | 0.156 |
+
+**Outcome: linear RGB is essentially neutral.** Within val-set noise (~1-2%
+with n=50). The -2 to -5% LPIPS prediction was wrong.
+
+**Why linear RGB didn't deliver:**
+- LPIPS aux is computed in sRGB (we convert at the boundary), so the
+  perceptual gradient signal is identical between sRGB and linear RGB
+  trainings. Only the MSE/v_target and bilinear-upsample paths use
+  physically correct math, and at 128px those don't dominate.
+- bf16 numerical noise probably drowns out small precision gains from
+  linear math.
+- PIL augmentations still happen in sRGB before conversion, so part of
+  the data path retains sRGB nonlinearity.
+- Most importantly: **all three architectures (exp08-lpips, exp10, exp11)
+  converge to the same ~0.152-0.153 best-LPIPS ceiling. The architectural
+  ceiling for this dataset is real.**
+
+### Architectural ceiling — strong evidence
+
+| model | best LPIPS | best SSIM | trainable params | external priors |
+|---|---:|---:|---:|---|
+| exp08-lpips | **0.152** | 0.719 | 31.6M | ImageNet ResNet18 |
+| exp10 | 0.153 | **0.736** | 43.9M | none |
+| exp11 (linear) | 0.153 | 0.732 | 43.9M | none |
+| floor | 0.199 | 0.617 | 0 | — |
+
+All three architectures land within ~0.001 LPIPS of each other. **More
+architecture work at this scale produces ~zero perceptual gain.** The ~0.05
+LPIPS gap to the floor is real, but the next ~0.05 to a meaningful absolute
+gain is gated by data, not by model design.
+
+### Recommended next moves (revised after exp11)
+
+| candidate | expected LPIPS gain | cost | priority |
+|---|---|---|---|
+| **Larger paired dataset (1k-10k pairs)** | **5-10%** | data generation | **🔴 high** |
+| Higher resolution (256px) | unclear, possibly meaningful | 4x compute | 🟡 medium |
+| Longer training + best-LPIPS early-stop | 1-2% | trivial | 🟡 medium |
+| `--lpips-weight 0.4` ablation | 1-2% | 1 flag | 🟡 medium |
+| FiLM + 2 ResBlocks (original Scenario A exp12) | <2% | hour | 🟢 low |
+| linear RGB everywhere (incl. PIL aug rewrite) | <2% | hours | ⚫ skip |
+
+### exp12 — 256px on the existing 287-pair dataset — PLANNED
+
+After exp10 / exp11 confirmed an architectural ceiling at 128px (LPIPS ~0.152
+across three different architectures), the natural next axis is resolution
+rather than more architecture. Higher resolution gives:
+
+- More pixels = more LPIPS sensitivity (the metric should resolve smaller
+  differences, exposing whether our models still have headroom).
+- Larger receptive-field demands at the same fractional levels (more work
+  for attention).
+- A fairer test of how the architecture scales for the upcoming 1k-pair
+  dataset (which is being generated at 1024px anyway, so we'll downscale).
+
+Same architecture as exp10 (no encoder, mc=88, FM, LPIPS 0.2, dropout,
+bf16, dataloader perf). One change: `--image-size 256` and matching
+`--attn-resolutions "16,32,64"` to preserve fractional attention coverage.
+
+| level | feat at 128px | feat at 256px | exp10 attn (8,16,32) | exp12 attn (16,32,64) |
+|---|---:|---:|---|---|
+| h1 | 128 | 256 | — | — |
+| h2 | 64 | 128 | — | — |
+| h3 | 32 | 64 | ✓ | ✓ |
+| h4 | 16 | 32 | ✓ | ✓ |
+| bottleneck (mid_attn) | 8 | 16 | ✓ always-on | ✓ always-on |
+
+Cost estimates (extrapolated from 128px bench, no fresh measurement
+because the GPU is busy generating the 1k dataset):
+
+- Step time: ~120-160 ms (vs 31 ms at 128px).
+- VRAM: ~5-6 GB peak (vs 1.3 GB at 128px). Comfortable on a 16 GB 4090.
+- 20k steps wall-clock: ~45 min with dataloader + bf16.
+
+Color space: keep `srgb` for now. Linear RGB was a wash at 128px; revisit
+when EXR data lands.
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 88 `
+    --image-size 256 `
+    --attn-resolutions "16,32,64" `
+    --amp bf16 `
+    --color-space srgb `
+    --source-dropout 0.15 --lpips-weight 0.2 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --checkpoint-every 5000 --sample-panel-steps 20 `
+    --num-workers 8 `
+    --wandb --wandb-project nanoWarp `
+    --wandb-run-name exp12_256px_noenc_attn16_32_64_bf16_mc88_20k `
+    --wandb-tags "flow,no-encoder,lpips,attn-multiscale,bf16,256px,exp12" `
+    --outdir out/exp12_256px_noenc_attn16_32_64_bf16_mc88_20k
+```
+
+If VRAM gets tight, drop `--batch-size` from 4 to 2 (default in trainer is 4).
+
+Predictions:
+- LPIPS at 256px should be **lower in absolute terms** because the metric
+  has more spatial bandwidth to penalize errors. Our 128px LPIPS of 0.152
+  doesn't translate directly — what matters is the relative gap to the
+  256px floor, which we'd want to also compute.
+- Visual quality should be noticeably better — anime-style flat regions
+  and edges show up more crisply at 256.
+- Memorisation risk: same 287 pairs, more pixel content per pair, so it's
+  unclear if data scarcity dominates more or less at this resolution.
+  Train-val gap diagnostic worth running again after this finishes.
+
+### exp11 / exp12 — original conditional plan (superseded by 256px decision)
 
 Spec ahead of time so the next pair of experiments is unambiguous.
 
