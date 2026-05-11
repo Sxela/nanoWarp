@@ -96,6 +96,7 @@ def main():
     losses = []
     ssim_vals = []
     lpips_vals = []
+    lpips_vgg_vals = []
     panels_written = 0
     for batch_idx, batch in enumerate(dl):
         if batch_idx >= args.max_batches:
@@ -134,7 +135,8 @@ def main():
 
             metric_vals = metrics_fn.compute(to_display(samples), to_display(target))
             ssim_vals.append(metric_vals["ssim"])
-            lpips_vals.append(metric_vals["lpips"])
+            lpips_vals.append(metric_vals["lpips_squeeze"])
+            lpips_vgg_vals.append(metric_vals["lpips_vgg"])
 
             save_val_panel(
                 to_display(source),
@@ -158,7 +160,8 @@ def main():
             )
             metric_vals = metrics_fn.compute(to_display(samples), to_display(target))
             ssim_vals.append(metric_vals["ssim"])
-            lpips_vals.append(metric_vals["lpips"])
+            lpips_vals.append(metric_vals["lpips_squeeze"])
+            lpips_vgg_vals.append(metric_vals["lpips_vgg"])
 
     metrics = {
         "checkpoint": args.checkpoint,
@@ -169,7 +172,9 @@ def main():
         "num_batches": len(losses),
         "mean_loss": sum(losses) / max(len(losses), 1),
         "mean_ssim_sampled": sum(ssim_vals) / max(len(ssim_vals), 1),
-        "mean_lpips_sampled": sum(lpips_vals) / max(len(lpips_vals), 1),
+        "mean_lpips_sampled": sum(lpips_vals) / max(len(lpips_vals), 1),  # squeeze, kept for exp01-15 continuity
+        "mean_lpips_squeeze_sampled": sum(lpips_vals) / max(len(lpips_vals), 1),
+        "mean_lpips_vgg_sampled": sum(lpips_vgg_vals) / max(len(lpips_vgg_vals), 1),
         "train_config": train_cfg,
     }
     with open(outdir / "val_metrics.json", "w") as f:

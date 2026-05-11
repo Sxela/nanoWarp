@@ -817,6 +817,135 @@ artifact**, not an absolute ceiling. The architectures didn't run out of
 expressiveness — they ran out of pixels. exp12 at 256px breaks past it
 cleanly, and exp14 (with 1k pairs at 256px) should push further.
 
+### exp14v2 — exp10 architecture on the 1k-pair dataset, 256px — DONE
+
+After the LPIPS-aux bug fix (see Known bugs), exp14 was re-launched as
+exp14v2 with the same spec on the 1k-pair dataset at 256px. Validation on
+the 1k val split:
+
+| step | LPIPS ↓ | SSIM ↑ |
+|---:|---:|---:|
+|  5k | 0.1770 | 0.632 |
+| **10k** | **0.1767 (best)** | 0.654 |
+| 15k | 0.1798 | 0.666 |
+| 20k | 0.1819 | 0.674 |
+| 25k | 0.1805 | 0.679 |
+| 30k | 0.1816 | 0.683 |
+| 35k | 0.1830 | 0.685 |
+| 40k | 0.1832 | **0.686 (final)** |
+
+**Same LPIPS-regression-while-SSIM-keeps-climbing pattern** we saw in
+exp10/exp12 — LPIPS bottoms at step 10k; training past 10k trades
+perceptual quality for structural fidelity. Best-LPIPS checkpoint is
+step 10k, not the 40k final.
+
+Comparing on the same 1k val set (eval on identical val pairs even for
+older checkpoints):
+
+| model | LPIPS-squeeze | SSIM |
+|---|---:|---:|
+| exp12 (287 pairs, 20k, 256px) | 0.190 | 0.635 |
+| exp14v2 (1k pairs, 40k, 256px) | 0.183 | **0.686** |
+| Δ | -3.7% | **+8.0%** |
+
+**Surprise**: 3.5× more paired data and 2× more steps mainly bought us
+**SSIM (structural diversity)**, not LPIPS (perceptual quality). This is
+the opposite of what I predicted earlier. The 1k dataset has more pose /
+composition variety, which exp14v2 captures (SSIM up), but the perceptual
+ceiling didn't move much from data alone.
+
+### exp15 — exp14v2 + VGG feature loss (content L1 + Gram-matrix style L1) — DONE
+
+Adds VGG content + Gram style loss on top of exp14v2's config (1k pairs,
+256px). 20k steps. Same other flags.
+
+Final result vs baselines (same 1k val set):
+
+| model | LPIPS-squeeze ↓ | SSIM ↑ |
+|---|---:|---:|
+| exp12 (287 pairs, no VGG) | 0.190 | 0.635 |
+| exp14v2 (1k pairs, no VGG, 40k) | 0.183 | **0.686** |
+| **exp15 (1k pairs, +VGG content+Gram, 20k)** | **0.162** | 0.631 |
+
+- **LPIPS-squeeze: -11.5% vs exp14v2.** The biggest single-feature win
+  since the resolution bump.
+- **SSIM: -8.0% vs exp14v2.** Classic style-vs-structure tradeoff. VGG/
+  Gram pushes the model toward texture-statistical matching at small
+  cost to pixel-aligned structure. For a stylization task this is the
+  right direction, but worth flagging.
+
+### Loss-redundancy analysis (added 2026-05-11)
+
+`--lpips-weight 0.2` (SqueezeNet backbone, BAPPS-learned weights) and
+`--feature-content-weight 1.0` (VGG16 backbone, L1 distance) are both
+"pretrained-feature-distance" signals. They overlap conceptually:
+
+| loss | backbone | weights | distance |
+|---|---|---|---|
+| LPIPS-squeeze | SqueezeNet (~0.7M) | BAPPS-learned | L2 of (pred - tgt) features |
+| VGG content | VGG16 (~14M) | unweighted | L1 of (pred - tgt) features |
+| **Gram style** | VGG16 | unweighted | L1 of channel-correlation matrices |
+
+The Gram style term is genuinely orthogonal — it captures texture
+statistics independent of pixel position. The content L1 and LPIPS are
+plausibly redundant; VGG-content with weight 1.0 dominates the gradient
+budget vs LPIPS-squeeze with weight 0.2.
+
+Plus: **we're partially overfitting to metric.** Reporting LPIPS-squeeze
+as the win metric while training with LPIPS-squeeze in the loss creates
+a confound. Validated on exp08-noenc:
+
+```
+mean_lpips_squeeze = 0.163  (in training loop)
+mean_lpips_vgg     = 0.209  (never in any training loss)
+```
+
+About 28% gap between in-loop and out-of-loop perceptual metrics on the
+same model. Going forward, validate.py reports both:
+- `mean_lpips_squeeze_sampled` — continuity with exp01-15
+- `mean_lpips_vgg_sampled` — honest, never-in-loop perceptual check
+
+Older results above are reported on `_squeeze` only (the metric they
+were validated with at the time). Re-running validation on those
+checkpoints with the updated `validate.py` will populate the `_vgg`
+column too.
+
+### exp17 — exp15 minus LPIPS-squeeze (test the redundancy) — PLANNED
+
+Same as exp15 with `--lpips-weight 0` to drop the LPIPS-squeeze aux
+entirely. Tests whether SqueezeNet was contributing anything beyond
+redundancy with VGG-content.
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime_1k `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 88 `
+    --image-size 256 `
+    --attn-resolutions "16,32,64" `
+    --amp bf16 `
+    --color-space srgb `
+    --source-dropout 0.15 --lpips-weight 0.0 `
+    --feature-content-weight 1.0 --feature-style-weight 5000.0 `
+    --feature-loss-layers "8,15,22" `
+    --aug-resize-scale 1.5 --aug-scale-jitter 0.15 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --checkpoint-every 5000 --sample-panel-steps 20 `
+    --num-workers 8 `
+    --wandb --wandb-project nanoWarp `
+    --wandb-run-name exp17_no_lpips_only_vgg_1k_256px_20k `
+    --wandb-tags "flow,no-encoder,feature-loss,no-lpips,256px,exp17" `
+    --outdir out/exp17_no_lpips_only_vgg_1k_256px_20k
+```
+
+Predictions:
+- If exp17 LPIPS-vgg ≈ exp15 LPIPS-vgg → LPIPS-squeeze was redundant. Drop
+  it from the default recipe; saves ~3 ms/step.
+- If exp17 LPIPS-vgg meaningfully worse → SqueezeNet's BAPPS weights were
+  carrying signal VGG-content doesn't, despite the smaller backbone.
+- Either way, exp17's LPIPS-squeeze will probably worsen slightly since
+  we removed the direct training term for it.
+
 ### exp12 — original spec (kept for reference)
 
 After exp10 / exp11 confirmed an architectural ceiling at 128px (LPIPS ~0.152
