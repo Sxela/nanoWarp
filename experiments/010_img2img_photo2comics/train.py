@@ -14,8 +14,10 @@ from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from src.img2img import EMA, Img2ImgDiffusionUNet, build_train_val_datasets
 from src.img2img.colorspace import linear_to_srgb
 from src.img2img.diffusion import DiffusionConfig, GaussianImageDiffusion
+from src.img2img.discriminator import PatchDiscriminator
 from src.img2img.feature_loss import VGGFeatureLoss
 from src.img2img.flow import FlowConfig, RectifiedImageFlow
+from src.img2img.gan_loss import hinge_d_loss, hinge_g_loss
 from src.img2img.render import save_val_panel
 from src.toy_diffusion.render import save_loss_plot
 from src.utils.config import apply_yaml_config
@@ -58,6 +60,12 @@ def parse_args():
     p.add_argument("--lr-warmup-steps", type=int, default=0)
     p.add_argument("--lr-cosine", action="store_true")
     p.add_argument("--grad-clip-norm", type=float, default=0.0)
+    p.add_argument("--max-loss-spike-ratio", type=float, default=10.0,
+                   help="If current loss > N * mean(last 50 losses), skip backward/step/EMA for this batch. "
+                        "Protects against single-bad-batch divergence. 0 = disabled. Default 10.")
+    p.add_argument("--no-skip-nonfinite", action="store_true",
+                   help="By default we skip backward/step when loss or grad-norm is NaN/Inf. "
+                        "Pass this to disable the safety net (not recommended).")
     p.add_argument("--num-workers", type=int, default=4,
                    help="DataLoader worker processes. 0 = synchronous (slow). 4 default works on most "
                         "machines; 8 saturates GPU at bs=4/128px on a 4090 in benchmarks. Pin_memory + "
@@ -117,6 +125,34 @@ def parse_args():
                    help="Comma-separated VGG16 layer indices for content + style loss. "
                         "Defaults follow fastai/Johnson (after relu2_2, relu3_3, relu4_3). "
                         "Earlier layers capture low-level texture; later layers capture semantic style.")
+    p.add_argument("--feature-content-layer-weights", default=None,
+                   help="Comma-separated per-layer multipliers for the content L1 term, in the same "
+                        "order as --feature-loss-layers. Default uniform 1/n (preserves the old "
+                        "averaged behaviour). fastai used '5,15,2' to emphasize mid-level features.")
+    p.add_argument("--feature-style-layer-weights", default=None,
+                   help="Comma-separated per-layer multipliers for the Gram style L1 term. Default "
+                        "uniform 1/n. Try matching fastai's content weights or your own ratio.")
+    p.add_argument("--gan-weight", type=float, default=0.0,
+                   help="Adversarial loss weight on the generator. 0 = no GAN. Typical pix2pix range "
+                        "0.1-1.0. Start small (0.1) since GAN is a regulariser on top of LPIPS/feature "
+                        "loss, not a primary signal.")
+    p.add_argument("--gan-d-channels", type=int, default=64,
+                   help="Base channels for the PatchGAN discriminator (~2-3M params at 64).")
+    p.add_argument("--gan-d-layers", type=int, default=3,
+                   help="Number of strided conv layers in the discriminator. 3 = pix2pix 70x70 PatchGAN.")
+    p.add_argument("--gan-d-lr", type=float, default=1e-4,
+                   help="Learning rate for the discriminator's AdamW. Typically lower than generator LR.")
+    p.add_argument("--gan-d-beta1", type=float, default=0.5,
+                   help="AdamW beta1 for the discriminator. 0.5 is pix2pix / GAN convention "
+                        "(vs 0.9 for generator); makes D less momentum-driven and more responsive.")
+    p.add_argument("--gan-pretrain-g-steps", type=int, default=0,
+                   help="Phase 1 (fastai NoGAN): first N steps train G with LPIPS/feature only, "
+                        "no GAN gradient on G, no D updates. Lets G reach a 'reasonable' baseline "
+                        "before D enters the game. 0 = skip phase 1.")
+    p.add_argument("--gan-pretrain-d-steps", type=int, default=0,
+                   help="Phase 2 (fastai NoGAN): after G pretrain, freeze G for M steps while D "
+                        "trains alone on (real, current-G-output) pairs. Calibrates D before "
+                        "alternating GAN. 0 = skip phase 2 (D starts fresh in phase 3).")
     p.add_argument("--aug-resize-scale", type=float, default=1.10,
                    help="Intermediate resize ratio in PairedImageAugment before random crop. "
                         "1.10 = 10%% extra room (default, conservative). 1.5-2.0 = aggressive zoom-crop, "
@@ -198,6 +234,17 @@ def t_range_at(step: int, args, timesteps: int) -> tuple[int, int]:
     if args.high_t_warmup_steps > 0 and step <= args.high_t_warmup_steps:
         return max(0, min(args.high_t_warmup_low, timesteps - 1)), timesteps
     return 0, timesteps
+
+
+def gan_phase_at(step: int, args, discriminator) -> str:
+    """fastai NoGAN three-phase schedule. Returns 'g_pretrain', 'd_pretrain', or 'full'."""
+    if discriminator is None or args.gan_weight <= 0:
+        return "off"
+    if step <= args.gan_pretrain_g_steps:
+        return "g_pretrain"
+    if step <= args.gan_pretrain_g_steps + args.gan_pretrain_d_steps:
+        return "d_pretrain"
+    return "full"
 
 
 def main():
@@ -289,17 +336,36 @@ def main():
             aux_lpips = raw_lpips
         print(f"lpips_aux_net={args.lpips_aux_net} weight={args.lpips_weight} (val metric stays on squeeze for continuity)")
 
+    discriminator = None
+    opt_d = None
+    if args.gan_weight > 0:
+        discriminator = PatchDiscriminator(
+            in_channels=6, base_channels=args.gan_d_channels, n_layers=args.gan_d_layers
+        ).to(device)
+        opt_d = torch.optim.AdamW(
+            discriminator.parameters(), lr=args.gan_d_lr, betas=(args.gan_d_beta1, 0.999)
+        )
+        d_params = sum(p.numel() for p in discriminator.parameters())
+        print(f"discriminator PatchGAN ch={args.gan_d_channels} layers={args.gan_d_layers}  "
+              f"params={d_params:,}  d_lr={args.gan_d_lr}  d_beta1={args.gan_d_beta1}  "
+              f"gan_weight={args.gan_weight}")
+
     feature_loss_fn = None
     if args.feature_content_weight > 0 or args.feature_style_weight > 0:
         feat_layers = tuple(int(x) for x in args.feature_loss_layers.split(",") if x.strip())
+        content_lw = tuple(float(x) for x in args.feature_content_layer_weights.split(",")) if args.feature_content_layer_weights else None
+        style_lw = tuple(float(x) for x in args.feature_style_layer_weights.split(",")) if args.feature_style_layer_weights else None
         feature_loss_fn = VGGFeatureLoss(
             layers=feat_layers,
             content_weight=args.feature_content_weight,
             style_weight=args.feature_style_weight,
+            content_layer_weights=content_lw,
+            style_layer_weights=style_lw,
         ).to(device)
         print(
-            f"feature_loss layers={feat_layers} "
-            f"content_w={args.feature_content_weight} style_w={args.feature_style_weight}"
+            f"feature_loss layers={feat_layers} content_w={args.feature_content_weight} "
+            f"style_w={args.feature_style_weight} content_lw={feature_loss_fn.content_layer_weights} "
+            f"style_lw={feature_loss_fn.style_layer_weights}"
         )
 
     start_step = 1
@@ -312,6 +378,13 @@ def main():
             print(f"resumed optimizer state from {args.resume}")
         else:
             print(f"warning: {args.resume} has no saved optimizer state; AdamW moments will start fresh")
+        if discriminator is not None and "discriminator" in ckpt_resume:
+            discriminator.load_state_dict(ckpt_resume["discriminator"])
+            if "optimizer_d" in ckpt_resume and opt_d is not None:
+                opt_d.load_state_dict(ckpt_resume["optimizer_d"])
+            print("resumed discriminator + opt_d state")
+        elif discriminator is not None:
+            print("warning: discriminator enabled but checkpoint has no discriminator state; D starts fresh")
         start_step = int(ckpt_resume.get("step", 0)) + 1
         print(f"resumed from {args.resume} -> starting at step {start_step}")
         if start_step > args.steps:
@@ -362,24 +435,100 @@ def main():
                 feature_content = fl["content"].detach()
                 feature_style = fl["style"].detach()
                 loss = loss + feature_total
+            g_gan_loss = torch.tensor(0.0, device=device)
+            phase = gan_phase_at(step, args, discriminator)
+            # GAN term enters G's loss only in the "full" phase. During "g_pretrain"
+            # we train G on LPIPS/feature only. During "d_pretrain" G is frozen below.
+            if phase == "full":
+                d_fake_for_g = discriminator(source, x0_hat)
+                g_gan_loss = hinge_g_loss(d_fake_for_g)
+                loss = loss + args.gan_weight * g_gan_loss
 
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        if args.grad_clip_norm > 0:
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                [p for p in model.parameters() if p.requires_grad], max_norm=args.grad_clip_norm
+        # Safety: skip backward/step if loss is non-finite or a huge spike vs recent average.
+        loss_val = float(loss.item())
+        skip_reason = None
+        if not args.no_skip_nonfinite and not math.isfinite(loss_val):
+            skip_reason = "non-finite-loss"
+        elif args.max_loss_spike_ratio > 0 and len(losses) >= 10:
+            recent_mean = sum(losses[-50:]) / min(50, len(losses))
+            if recent_mean > 0 and loss_val > args.max_loss_spike_ratio * recent_mean:
+                skip_reason = f"spike-{loss_val / recent_mean:.1f}x"
+        if skip_reason is not None:
+            feat_part = (f" | feat_c {float(feature_content):.4f} feat_s {float(feature_style):.6f}"
+                         if feature_loss_fn is not None else "")
+            print(
+                f"step {step:5d} | SKIP ({skip_reason}) | loss {loss_val:.4f} | "
+                f"diffusion {float(diffusion_loss):.4f} | lpips {float(lpips_loss):.4f}{feat_part}"
             )
-            grad_norms.append(float(grad_norm))
-        opt.step()
-        ema.update(model)
+            if wandb is not None:
+                wandb.log({
+                    "train/skipped_step": 1,
+                    "train/skipped_loss": loss_val if math.isfinite(loss_val) else 0.0,
+                    "train/skip_reason_non_finite": int(skip_reason == "non-finite-loss"),
+                }, step=step)
+            # Record a finite placeholder so the spike detector doesn't get derailed
+            # by a single corrupted value, but don't backward/step/ema.
+            if math.isfinite(loss_val):
+                losses.append(loss_val)
+            opt.zero_grad(set_to_none=True)
+            continue
 
-        losses.append(float(loss.item()))
+        # G update: skipped entirely during phase 2 (D pretrain).
+        if phase != "d_pretrain":
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            if args.grad_clip_norm > 0:
+                grad_norm = torch.nn.utils.clip_grad_norm_(
+                    [p for p in model.parameters() if p.requires_grad], max_norm=args.grad_clip_norm
+                )
+                if not args.no_skip_nonfinite and not torch.isfinite(grad_norm).item():
+                    print(f"step {step:5d} | SKIP (non-finite-grad-norm) | grad_norm {float(grad_norm)}")
+                    if wandb is not None:
+                        wandb.log({"train/skipped_step": 1, "train/skip_reason_non_finite_grad": 1}, step=step)
+                    opt.zero_grad(set_to_none=True)
+                    continue
+                grad_norms.append(float(grad_norm))
+            opt.step()
+            ema.update(model)
+        else:
+            # During D pretrain: clear any G gradients that might have accumulated
+            # from the autocast G forward (shouldn't be needed since we didn't
+            # backward, but defensive).
+            opt.zero_grad(set_to_none=True)
+
+        # D update — happens in phases 2 (d_pretrain) and 3 (full). Skipped in
+        # phase 1 (g_pretrain) since D doesn't exist conceptually yet.
+        d_loss_val = 0.0
+        d_real_score = 0.0
+        d_fake_score = 0.0
+        if discriminator is not None and phase in ("d_pretrain", "full"):
+            with amp_ctx:
+                d_real = discriminator(source, target)
+                d_fake_for_d = discriminator(source, x0_hat.detach())
+                d_loss = hinge_d_loss(d_real, d_fake_for_d)
+                d_real_score = float(d_real.mean().item())
+                d_fake_score = float(d_fake_for_d.mean().item())
+            d_loss_val = float(d_loss.item())
+            if math.isfinite(d_loss_val):
+                opt_d.zero_grad(set_to_none=True)
+                d_loss.backward()
+                if args.grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=args.grad_clip_norm)
+                opt_d.step()
+            else:
+                # Skip D step if its loss is NaN/Inf.
+                opt_d.zero_grad(set_to_none=True)
+
+        losses.append(loss_val)
         if step % args.log_every == 0 or step == 1:
             extra = f" | grad_norm {grad_norms[-1]:.4f}" if grad_norms else ""
             feat_extra = f" | feat_c {float(feature_content):.4f} feat_s {float(feature_style):.6f}" if feature_loss_fn is not None else ""
+            gan_extra = (f" | phase {phase} g_gan {float(g_gan_loss):.4f} d_loss {d_loss_val:.4f} "
+                         f"d_real {d_real_score:+.3f} d_fake {d_fake_score:+.3f}"
+                         if discriminator is not None else "")
             print(
                 f"step {step:5d} | lr {cur_lr:.6f} | t in [{t_low},{t_high}) | "
-                f"loss {loss.item():.6f} | diffusion {float(diffusion_loss):.6f} | lpips {float(lpips_loss):.6f}{feat_extra}{extra}"
+                f"loss {loss.item():.6f} | diffusion {float(diffusion_loss):.6f} | lpips {float(lpips_loss):.6f}{feat_extra}{gan_extra}{extra}"
             )
             save_loss_plot(losses, outdir / "loss.png")
             if wandb is not None:
@@ -396,6 +545,11 @@ def main():
                     wandb_metrics["train/feature_content"] = float(feature_content)
                     wandb_metrics["train/feature_style"] = float(feature_style)
                     wandb_metrics["train/feature_total"] = float(feature_total)
+                if discriminator is not None:
+                    wandb_metrics["train/g_gan_loss"] = float(g_gan_loss)
+                    wandb_metrics["train/d_loss"] = d_loss_val
+                    wandb_metrics["train/d_real_score"] = d_real_score
+                    wandb_metrics["train/d_fake_score"] = d_fake_score
                 wandb.log(wandb_metrics, step=step)
         if step % args.panel_every == 0 or step == args.steps:
             model.eval()
@@ -443,32 +597,34 @@ def main():
                 wandb.log({"val/mean_loss_random_t": mean_val}, step=step)
 
         if args.checkpoint_every > 0 and step % args.checkpoint_every == 0 and step != args.steps:
-            torch.save(
-                {
-                    "model": model.state_dict(),
-                    "ema_model": ema.model.state_dict(),
-                    "optimizer": opt.state_dict(),
-                    "config": vars(args),
-                    "diffusion": method_cfg.__dict__,
-                    "method": args.method,
-                    "step": step,
-                },
-                outdir / f"model_step_{step:06d}.pt",
-            )
+            ckpt_payload = {
+                "model": model.state_dict(),
+                "ema_model": ema.model.state_dict(),
+                "optimizer": opt.state_dict(),
+                "config": vars(args),
+                "diffusion": method_cfg.__dict__,
+                "method": args.method,
+                "step": step,
+            }
+            if discriminator is not None:
+                ckpt_payload["discriminator"] = discriminator.state_dict()
+                ckpt_payload["optimizer_d"] = opt_d.state_dict()
+            torch.save(ckpt_payload, outdir / f"model_step_{step:06d}.pt")
             print(f"saved intermediate checkpoint at step {step}")
 
-    torch.save(
-        {
-            "model": model.state_dict(),
-            "ema_model": ema.model.state_dict(),
-            "optimizer": opt.state_dict(),
-            "config": vars(args),
-            "diffusion": method_cfg.__dict__,
-            "method": args.method,
-            "step": args.steps,
-        },
-        outdir / "model.pt",
-    )
+    final_payload = {
+        "model": model.state_dict(),
+        "ema_model": ema.model.state_dict(),
+        "optimizer": opt.state_dict(),
+        "config": vars(args),
+        "diffusion": method_cfg.__dict__,
+        "method": args.method,
+        "step": args.steps,
+    }
+    if discriminator is not None:
+        final_payload["discriminator"] = discriminator.state_dict()
+        final_payload["optimizer_d"] = opt_d.state_dict()
+    torch.save(final_payload, outdir / "model.pt")
     with open(outdir / "metrics.json", "w") as f:
         json.dump({
             "final_loss": losses[-1],

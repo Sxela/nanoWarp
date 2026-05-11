@@ -53,6 +53,8 @@ class VGGFeatureLoss(nn.Module):
         layers: tuple[int, ...] = DEFAULT_VGG_LAYERS,
         content_weight: float = 1.0,
         style_weight: float = 5000.0,
+        content_layer_weights: tuple[float, ...] | None = None,
+        style_layer_weights: tuple[float, ...] | None = None,
     ):
         super().__init__()
         from torchvision.models import vgg16, VGG16_Weights
@@ -83,6 +85,22 @@ class VGGFeatureLoss(nn.Module):
         self.content_weight = float(content_weight)
         self.style_weight = float(style_weight)
 
+        # Per-layer weights. None -> uniform 1/n (preserves the old `.mean()`
+        # behavior exactly). Custom values are raw multipliers; the user
+        # picks the magnitude.
+        n = len(layers)
+        self.content_layer_weights = self._resolve_layer_weights(content_layer_weights, n)
+        self.style_layer_weights = self._resolve_layer_weights(style_layer_weights, n)
+
+    @staticmethod
+    def _resolve_layer_weights(weights, n):
+        if weights is None:
+            return [1.0 / n] * n
+        weights = [float(w) for w in weights]
+        if len(weights) != n:
+            raise ValueError(f"layer weights length {len(weights)} does not match num layers {n}")
+        return weights
+
     def train(self, mode: bool = True):
         # Override: VGG slices must always be in eval to keep frozen weights
         # and statistics stable during training mode toggles.
@@ -95,8 +113,10 @@ class VGGFeatureLoss(nn.Module):
         return (x.clamp(0.0, 1.0) - self.mean) / self.std
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Returns a dict with `content`, `style`, and `total` losses (already
-        weighted in `total`; the per-term values are unweighted for logging)."""
+        """Returns a dict with `content`, `style`, and `total` losses. The
+        per-term values use the per-layer weights so they are directly
+        comparable across configs; `total` is then scaled by content/style
+        weights and summed."""
         pred_h = self._normalize(pred)
         with torch.no_grad():
             target_h = self._normalize(target)
@@ -104,20 +124,20 @@ class VGGFeatureLoss(nn.Module):
         content_terms: list[torch.Tensor] = []
         style_terms: list[torch.Tensor] = []
 
-        for slice_module in self.slices:
+        for i, slice_module in enumerate(self.slices):
             pred_h = slice_module(pred_h)
             with torch.no_grad():
                 target_h = slice_module(target_h)
 
             if self.content_weight > 0:
-                content_terms.append(F.l1_loss(pred_h, target_h))
+                content_terms.append(self.content_layer_weights[i] * F.l1_loss(pred_h, target_h))
             if self.style_weight > 0:
                 pred_gram = _gram_matrix(pred_h)
                 with torch.no_grad():
                     target_gram = _gram_matrix(target_h)
-                style_terms.append(F.l1_loss(pred_gram, target_gram))
+                style_terms.append(self.style_layer_weights[i] * F.l1_loss(pred_gram, target_gram))
 
-        content = torch.stack(content_terms).mean() if content_terms else torch.zeros((), device=pred.device)
-        style = torch.stack(style_terms).mean() if style_terms else torch.zeros((), device=pred.device)
+        content = torch.stack(content_terms).sum() if content_terms else torch.zeros((), device=pred.device)
+        style = torch.stack(style_terms).sum() if style_terms else torch.zeros((), device=pred.device)
         total = self.content_weight * content + self.style_weight * style
         return {"content": content, "style": style, "total": total}

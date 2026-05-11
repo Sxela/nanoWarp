@@ -873,6 +873,12 @@ Final result vs baselines (same 1k val set):
   Gram pushes the model toward texture-statistical matching at small
   cost to pixel-aligned structure. For a stylization task this is the
   right direction, but worth flagging.
+- **Spike at ~step 5k**: a single bad-batch loss spike disrupted
+  training. The optimizer eventually recovered and the run finished, but
+  the final result is likely a couple of percent worse than it would
+  have been without the corruption. The new `--max-loss-spike-ratio`
+  safeguard (added 2026-05-11) skips this kind of step entirely; runs
+  from here on should be more stable.
 
 ### Loss-redundancy analysis (added 2026-05-11)
 
@@ -910,7 +916,133 @@ were validated with at the time). Re-running validation on those
 checkpoints with the updated `validate.py` will populate the `_vgg`
 column too.
 
-### exp17 — exp15 minus LPIPS-squeeze (test the redundancy) — PLANNED
+### exp18 — exp15 with 2× model capacity (mc=88 → 128) — PLANNED
+
+Capacity scaling test. exp15 hit LPIPS 0.162 with the 1k dataset at
+mc=88 (~44M params). The question: is that the data ceiling or the
+architecture ceiling? Doubling model capacity isolates the test.
+
+Single-variable change vs exp15: `--model-ch 128` instead of 88.
+
+| | exp15 (mc=88) | **exp18 (mc=128)** |
+|---|---:|---:|
+| total params | 44.9M | **93.6M** (2.08×) |
+| step time (256px, bs=4, bf16) | 255 ms | 332 ms (+30%) |
+| peak VRAM | 10.0 GB | 11.3 GB |
+| 20k wall-clock | ~85 min | ~110 min |
+
+VRAM fits at bs=4 on a 16GB 4090, so no effective-batch confound — clean
+single-variable test.
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime_1k `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 128 `
+    --image-size 256 `
+    --attn-resolutions "16,32,64" `
+    --amp bf16 `
+    --color-space srgb `
+    --source-dropout 0.15 --lpips-weight 0.2 `
+    --feature-content-weight 1.0 --feature-style-weight 5000.0 `
+    --feature-loss-layers "8,15,22" `
+    --aug-resize-scale 1.5 --aug-scale-jitter 0.15 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --checkpoint-every 5000 --sample-panel-steps 20 `
+    --num-workers 8 `
+    --wandb --wandb-project nanoWarp `
+    --wandb-run-name exp18_capacity2x_mc128_1k_256px_20k `
+    --wandb-tags "flow,no-encoder,lpips,feature-loss,2x-capacity,256px,exp18" `
+    --outdir out/exp18_capacity2x_mc128_1k_256px_20k
+```
+
+Predictions:
+- If exp18 LPIPS ≤ 0.155 → capacity was partially limiting. Worth going
+  to 4× (exp19, mc=176, bs=2 with effective-batch confound).
+- If exp18 ≈ 0.162 → architecture's not the bottleneck at this scale.
+  Stop scaling capacity, look at data variety / loss design.
+- Visual check is the better signal for the "shape simplicity" concern
+  — doubled capacity might let the model encode more complex shapes
+  even if the LPIPS metric doesn't move much.
+
+### exp17 — exp15 minus LPIPS-squeeze (VGG content + Gram only) — DONE (with spike)
+
+Same as exp15 but `--lpips-weight 0.0`. Tests whether LPIPS-squeeze is
+redundant with VGG-content L1.
+
+**Hit a loss spike at step ~3k** (loss jumped from ~6 to ~21). Took ~5k
+steps to recover. The model still finished 20k but effectively had ~13k
+clean steps. This is what motivated the `--max-loss-spike-ratio`
+safeguard added 2026-05-11.
+
+Final val on the 1k val split:
+
+| | lpips_squeeze | lpips_vgg | SSIM | notes |
+|---|---:|---:|---:|---|
+| exp14v2 (40k, LPIPS only) | 0.1832 | **0.2396** | **0.686** | LPIPS-squeeze in loop |
+| exp15 (20k, LPIPS + VGG + Gram) | **0.1621** | 0.2926 | 0.631 | LPIPS-squeeze in loop |
+| exp17 (20k, VGG + Gram only) | 0.1885 | 0.3369 | 0.600 | LPIPS-squeeze NOT in loop |
+
+**Key findings (these reverse my earlier hypotheses):**
+
+1. **LPIPS-squeeze was NOT redundant.** exp17 (dropping LPIPS, keeping
+   VGG + Gram) is worst on *both* metrics. The BAPPS-learned weights on
+   SqueezeNet features were carrying real gradient signal that VGG-content
+   L1 doesn't replicate, despite VGG being the bigger backbone. So the
+   "smaller backbone with learned weights" beats "bigger backbone without."
+
+2. **exp14v2 (simplest recipe, LPIPS only) wins on lpips_vgg** — the
+   out-of-loop metric. Adding VGG content + Gram to the training loss
+   actively *hurts* out-of-loop perceptual quality. **Simpler training
+   generalizes better here.**
+   Caveat: exp14v2 trained 2× longer (40k vs 20k). Need to validate at
+   step-20k checkpoint for fair comparison.
+
+3. **SSIM tracks loss-complexity inversely.** Adding terms beyond
+   LPIPS-squeeze hurts pixel-aligned structure. The Gram style loss in
+   particular is position-unaware, so it pushes for "anime-textures-
+   anywhere" rather than "anime-textures-aligned-with-target."
+
+### Fair-step-count revalidation (added 2026-05-11)
+
+exp14v2 validated at step-20k to remove the training-time advantage:
+
+| at 20k | lpips_squeeze ↓ | lpips_vgg ↓ | SSIM ↑ |
+|---|---:|---:|---:|
+| **exp14v2 (LPIPS only)** | 0.1819 | **0.2481** | **0.674** |
+| exp15 (LPIPS + VGG + Gram) | **0.1621** | 0.2926 | 0.631 |
+| exp17 (VGG + Gram only) | 0.1885 | 0.3369 | 0.600 |
+| exp14v2 (LPIPS only, 40k) | 0.1832 | 0.2396 | 0.686 |
+
+**This reverses the exp15 "best" claim from earlier in this log.**
+
+- exp14v2 wins lpips_vgg by **15%** and SSIM by **7%** at the same step count.
+- exp15's lpips_squeeze advantage was a **metric-overfit artifact**:
+  training with LPIPS-squeeze in the loss while reporting against
+  LPIPS-squeeze produces an unrealistically good number.
+- Out-of-loop perceptual quality (lpips_vgg) is best with the *simplest*
+  training recipe.
+- VGG content + Gram (whether alone in exp17 or alongside LPIPS in exp15)
+  **actively hurt** quality on the honest metric.
+
+### Revised "current best" recipe
+
+**exp14v2** is the new best:
+- FM (flow matching) + flow_sigma_noise 0.05
+- no source encoder, mc=88
+- 256px, attn 16/32/64, bf16
+- LPIPS-squeeze aux at weight 0.2 (the only perceptual aux)
+- source dropout 0.15
+- aug resize_scale 1.5, scale_jitter 0.15
+- AdamW lr 2e-4 → 1e-5 cosine, warmup 500
+- grad clip 1.0, --max-loss-spike-ratio 10.0 (safeguard, future runs)
+
+### exp17_v2 — exp17 with safeguards (clean retry) — SKIPPED
+
+Originally planned to re-run exp17 cleanly without the spike. **Skipping**
+because the direction is already confirmed wrong: exp17 (VGG content+Gram
+only) is worst across all metrics, and even a clean ~5% improvement
+wouldn't flip the ordering vs exp14v2 or exp15. Not worth the GPU.
 
 Same as exp15 with `--lpips-weight 0` to drop the LPIPS-squeeze aux
 entirely. Tests whether SqueezeNet was contributing anything beyond
@@ -1113,6 +1245,16 @@ Tuning candidates if results look off:
 - Style dominating too much → drop to `--feature-style-weight 1000` or `500`.
 - Texture matching too aggressive (output looks "over-stylized") → lower style weight.
 - Texture not transferring (output stays photo-like) → raise style weight or add deeper VGG layers (e.g. `--feature-loss-layers "8,15,22,29"`).
+- **Per-layer weighting** (added 2026-05-11): currently we average per-layer
+  losses uniformly. fastai's recipe used `[5, 15, 2]` for the three default
+  layers (relu2_2 / relu3_3 / relu4_3) to emphasize mid-level texture/edge
+  features over the deepest semantic layer. Enable via:
+  `--feature-content-layer-weights "5,15,2" --feature-style-layer-weights "5,15,2"`.
+  Note: weights are raw multipliers, summed not averaged. fastai's weights
+  sum to 22 (vs uniform 1.0), so the effective content/style magnitude is
+  ~22× higher; compensate by lowering `--feature-content-weight` and
+  `--feature-style-weight` to ~1/22 of current values OR accept the larger
+  magnitude (the safeguards will skip steps if it spikes).
 
 Predictions:
 - If exp15 val LPIPS-squeeze < exp10's 0.153 by > 3% → Gram texture
@@ -1124,7 +1266,331 @@ Predictions:
   expected gain is "stronger anime stylization" which may not score on
   pairwise LPIPS but is the qualitative win.
 
-### exp16 — GAN aux loss for shape complexity — DRAFTED (not yet implemented)
+### exp19 — exp14v2 + `--lpips-weight 0.4` (double LPIPS aux) — PLANNED
+
+After the fair-step revalidation showed exp14v2 (LPIPS only) is the
+strongest recipe, the natural follow-up is to lean harder on the signal
+that's working. Single-flag change: double the LPIPS aux weight from 0.2
+to 0.4.
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime_1k `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 88 `
+    --image-size 256 `
+    --attn-resolutions "16,32,64" `
+    --amp bf16 `
+    --color-space srgb `
+    --source-dropout 0.15 --lpips-weight 0.4 `
+    --aug-resize-scale 1.5 --aug-scale-jitter 0.15 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --max-loss-spike-ratio 10.0 `
+    --checkpoint-every 5000 --sample-panel-steps 20 `
+    --num-workers 8 `
+    --wandb --wandb-project nanoWarp `
+    --wandb-run-name exp19_lpips04_noenc_1k_256px_20k `
+    --wandb-tags "flow,no-encoder,lpips,lpips-0.4,bf16,1k-dataset,256px,exp19" `
+    --outdir out/exp19_lpips04_noenc_1k_256px_20k
+```
+
+Predictions:
+- If exp19 lpips_vgg < 0.248 (exp14v2 at 20k) → LPIPS weight was
+  under-tuned. Adopt 0.4 as new default.
+- If exp19 ≈ exp14v2 → LPIPS at 0.2 was already saturating. Stay there.
+- If exp19 worse → 0.4 over-emphasizes perceptual at cost of MSE/structure.
+  Bracket the optimum: try 0.3 next.
+
+### exp22 — exp14v2 + `--lpips-aux-net vgg` (LPIPS backbone swap) — PLANNED
+
+The other axis to test on the winning recipe: does LPIPS-VGG beat
+LPIPS-squeeze when used as the *only* perceptual aux (no Gram, no
+content-L1 on top)? This is a cleaner version of what exp13 was
+originally supposed to do, but now against a known-good baseline.
+
+Single-flag change from exp14v2: `--lpips-aux-net vgg` instead of squeeze.
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime_1k `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 88 `
+    --image-size 256 `
+    --attn-resolutions "16,32,64" `
+    --amp bf16 `
+    --color-space srgb `
+    --source-dropout 0.15 --lpips-weight 0.2 --lpips-aux-net vgg `
+    --aug-resize-scale 1.5 --aug-scale-jitter 0.15 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --max-loss-spike-ratio 10.0 `
+    --checkpoint-every 5000 --sample-panel-steps 20 `
+    --num-workers 8 `
+    --wandb --wandb-project nanoWarp `
+    --wandb-run-name exp22_lpips_vgg_noenc_1k_256px_20k `
+    --wandb-tags "flow,no-encoder,lpips-vgg,bf16,1k-dataset,256px,exp22" `
+    --outdir out/exp22_lpips_vgg_noenc_1k_256px_20k
+```
+
+Notes:
+- We've now confirmed lpips_vgg is the honest metric (not in any training
+  loop here either, since we'd train against LPIPS-VGG features but the
+  metric uses different layers/weights).
+- Adds ~10ms/step (~3 min extra over 20k).
+- LPIPS-squeeze metric will likely worsen because we removed it from the
+  loss; lpips_vgg metric is the one that matters for this comparison.
+
+### exp16 — VGG fastai per-layer feature weights `[5, 15, 2]`, no LPIPS — DONE
+
+Run with VGG content + Gram using fastai's `[5, 15, 2]` per-layer weighting,
+**no LPIPS aux** (so directly comparable to exp17, which used uniform layer
+weights with the same other settings). 20k steps.
+
+Final val on 1k val split:
+
+| | lpips_sq ↓ | lpips_vgg ↓ | SSIM ↑ | loss config |
+|---|---:|---:|---:|---|
+| exp14v2 (20k) | 0.1819 | **0.2481** | **0.674** | LPIPS only |
+| exp15 (20k) | **0.1621** | 0.2926 | 0.631 | LPIPS + VGG uniform |
+| **exp16 (20k)** | **0.1671** | 0.3137 | 0.610 | **VGG fastai `[5,15,2]`, no LPIPS** |
+| exp17 (20k) | 0.1885 | 0.3369 | 0.600 | VGG uniform, no LPIPS |
+| exp14v2 (40k) | 0.1832 | 0.2396 | 0.686 | LPIPS only |
+
+**Three findings:**
+
+1. **Fastai weights `[5, 15, 2]` genuinely help vs uniform** in the VGG-only
+   regime — exp16 beats exp17 by **11% on lpips_sq, 7% on lpips_vgg, 2% on
+   SSIM**. Mid-layer emphasis (relu3_3 × 15) is real signal, not just
+   folklore. If we ever return to the VGG path, use these weights.
+
+2. **But the "VGG path is worse than LPIPS-only" conclusion stands.**
+   exp14v2 still beats exp16 by **26% on lpips_vgg and 10% on SSIM**.
+   Best-VGG-tuning loses to the simplest LPIPS-only recipe on the honest
+   out-of-loop metric.
+
+3. **lpips_sq disagrees with lpips_vgg on exp16 (a useful diagnostic).**
+   exp16 (no LPIPS-squeeze in loss) beats exp14v2 (LPIPS-squeeze in loss)
+   on lpips_sq by 8%. But exp14v2 wins lpips_vgg by 26%. When the two
+   LPIPS metrics disagree, **trust lpips_vgg** — the bigger backbone and
+   the out-of-loop status both favor it. exp16's lpips_sq win is likely a
+   SqueezeNet-feature artifact (fastai weights happen to produce features
+   that score well on SqueezeNet's specific BAPPS-tuned linear weights,
+   independent of overall perceptual quality).
+
+**Net**: the VGG-loss direction is cleanly crossed out as a defensible
+conclusion (not just an inference from adjacent data). The two
+high-priority next steps stay the same — push harder on the LPIPS path
+(exp19, exp22) instead of variants of the losing direction.
+
+After the exp17 revalidation showed VGG content + Gram underperformed
+LPIPS-squeeze on the honest lpips_vgg metric, our prior was to skip
+exp16. But "the metric-overfit story explains it" is one hypothesis;
+"the layer weighting was wrong" is another. Running exp16 closes the
+ambiguity:
+
+- If exp16 *also* underperforms exp14v2 on lpips_vgg + SSIM, the VGG
+  content + Gram path is genuinely worse for our task and we can cross
+  it out cleanly.
+- If exp16 surprisingly *beats* exp14v2 on lpips_vgg, mid-layer
+  emphasis matters and the previous VGG runs (exp15, exp17) were
+  poorly tuned.
+
+Visual inspection is also informative — the LPIPS/SSIM numbers don't
+capture whether stylization "looks right". A run with `[5, 15, 2]`
+weights might produce qualitatively better outputs even if the
+quantitative metrics don't move much.
+
+Expected outcome (honest): lpips_vgg around 0.30-0.34 (somewhere
+between exp15 and exp17), SSIM around 0.60-0.63. We expect to confirm
+the VGG-path conclusion. But running it makes the conclusion *defensible*
+rather than just *inferred*.
+
+Single-variable change vs exp15. Adds per-VGG-layer weighting to the
+content and style terms, matching fastai's `FeatureLoss` recipe. Default
+in our impl was uniform `[1/n] * n`; this experiment tests whether
+weighting middle layers (relu3_3) more heavily and the deepest layer
+(relu4_3) less is a meaningful gain.
+
+Layer weights `[5, 15, 2]` sum to 22 (vs uniform `[1/3, 1/3, 1/3]` summing
+to 1.0), so the effective loss magnitude is ~22× higher. To keep the
+overall content/style magnitude identical to exp15 — making this a clean
+single-variable change about *layer weighting*, not loss magnitude — we
+scale the overall content and style weights down by 22:
+
+- `--feature-content-weight 0.045` (= 1.0 / 22, was 1.0 in exp15)
+- `--feature-style-weight 227` (= 5000 / 22, was 5000 in exp15)
+- `--feature-content-layer-weights "5,15,2"`
+- `--feature-style-layer-weights "5,15,2"`
+
+The relative emphasis is what changes: mid-level features (relu3_3) get
+~68% of the total contribution (15/22) instead of 33% (uniform), at the
+cost of low- and high-level features.
+
+```powershell
+python scripts/train.py img2img-v1 data/photo2anime_1k `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 88 `
+    --image-size 256 `
+    --attn-resolutions "16,32,64" `
+    --amp bf16 `
+    --color-space srgb `
+    --source-dropout 0.15 --lpips-weight 0.2 `
+    --feature-content-weight 0.045 --feature-style-weight 227 `
+    --feature-loss-layers "8,15,22" `
+    --feature-content-layer-weights "5,15,2" --feature-style-layer-weights "5,15,2" `
+    --aug-resize-scale 1.5 --aug-scale-jitter 0.15 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --max-loss-spike-ratio 10.0 `
+    --checkpoint-every 5000 --sample-panel-steps 20 `
+    --num-workers 8 `
+    --wandb --wandb-project nanoWarp `
+    --wandb-run-name exp16_fastai_layer_weights_1k_256px_20k `
+    --wandb-tags "flow,no-encoder,lpips,feature-loss,gram-style,fastai-weights,bf16,1k-dataset,256px,exp16" `
+    --outdir out/exp16_fastai_layer_weights_1k_256px_20k
+```
+
+Predictions:
+- If exp16 LPIPS < exp15's 0.162 by > 2% → mid-layer emphasis is helpful
+  for texture matching. Adopt fastai-style weighting as a new default.
+- If exp16 ≈ exp15 → the per-layer weight choice doesn't move the
+  needle for our task. Uniform is fine; one less hyperparam to think about.
+- Visual check: deeper-layer de-emphasis (weight 2 vs 15 for the mid)
+  *might* let more source semantics through, slightly improving identity
+  preservation. Worth eyeballing alongside the metric.
+
+### exp20 — vanilla GAN aux (no NoGAN phasing) — DONE, grid-artifact collapse
+
+First attempt at adding the GAN aux on top of the exp14v2 recipe, with
+**both G and D updating from step 1** (no pretrain phasing). Used the
+PatchGAN discriminator + hinge loss + spectral norm setup described
+above, at `--gan-weight 0.1`.
+
+**Result: training "succeeded" by loss curves but visually produced
+grid-like artifacts** — periodic patterns roughly at the PatchGAN's
+~70-pixel receptive-field scale. The G output composed locally
+plausible 70×70 patches that didn't tile into coherent images. Classic
+GAN-from-scratch failure mode: random D produces meaningless gradient
+direction in the early steps, G wanders into a degenerate "fool the
+discriminator per patch" mode before learning the basic photo→anime
+mapping.
+
+This is *exactly* what fastai's NoGAN three-phase approach was designed
+to prevent. Implemented and queued as exp21.
+
+### exp21 — GAN aux with fastai NoGAN three-phase scheduling — IMPLEMENTED, PLANNED to launch
+
+**Status update (2026-05-11)**: now implemented and smoke-tested. The
+exp15/exp16/exp17 sequence revealed that VGG content + Gram is NOT what
+made fastai's image generation work — the **GAN adversarial loss** was the
+load-bearing piece. We now have a clean test: add GAN to the proven
+exp14v2 recipe (LPIPS only, no VGG) and see if it closes the shape-
+simplicity gap.
+
+**Implementation** (~250 lines across three new files):
+- [src/img2img/discriminator.py](../src/img2img/discriminator.py):
+  PatchGAN discriminator, pix2pix 70×70 receptive field at default depth.
+  Spectral norm on every conv. ~2.8M params at `--gan-d-channels 64`.
+- [src/img2img/gan_loss.py](../src/img2img/gan_loss.py): hinge GAN losses
+  (`hinge_d_loss`, `hinge_g_loss`). Hinge pairs naturally with spectral
+  norm and avoids BCE saturation.
+- [experiments/010_img2img_photo2comics/train.py](../experiments/010_img2img_photo2comics/train.py):
+  GAN flags, separate AdamW for D (lr=1e-4, β1=0.5 by pix2pix
+  convention), G update with adversarial term, D update on detached
+  fake. Discriminator state + opt_d state saved in checkpoints (preserved
+  on `--resume`). wandb logs `train/g_gan_loss`, `train/d_loss`,
+  `train/d_real_score`, `train/d_fake_score`.
+
+Smoke-tested at `--gan-weight 0.1`: D loss settles to its 2.0 hinge
+equilibrium, real and fake scores track each other (D learning to
+discriminate fairly), no NaN or spike under bf16 autocast.
+
+**NoGAN phase scheduling (added 2026-05-11)**: implementing fastai's three-
+phase approach to avoid random-G-meets-random-D chaos. Two new flags:
+
+- `--gan-pretrain-g-steps N`: phase 1, GAN inactive. G trains on
+  LPIPS/feature only. Reaches a "reasonable" baseline.
+- `--gan-pretrain-d-steps M`: phase 2, G frozen. D trains alone on
+  `(real, current-G-output)` pairs. Calibrates D before adversarial play.
+- After `N + M` steps, phase 3 (full GAN) starts.
+
+The smoke test confirms all three phases activate correctly at their
+step boundaries and the metric printout shows the active phase
+(`phase g_pretrain / d_pretrain / full`).
+
+```powershell
+# Recommended exp21 launch with NoGAN phasing.
+# Phase 1 (5k): pure LPIPS pretrain  — G learns the basics
+# Phase 2 (2k): D calibration       — D catches up on current G's output
+# Phase 3 (13k): full adversarial   — alternating G+D updates
+python scripts/train.py img2img-v1 data/photo2anime_1k `
+    --steps 20000 --log-every 100 --panel-every 1000 --val-every 1000 --val-batches 4 `
+    --method flow --flow-sigma-noise 0.05 `
+    --no-source-encoder --model-ch 88 `
+    --image-size 256 `
+    --attn-resolutions "16,32,64" `
+    --amp bf16 `
+    --color-space srgb `
+    --source-dropout 0.15 --lpips-weight 0.2 `
+    --gan-weight 0.1 --gan-d-channels 64 --gan-d-layers 3 --gan-d-lr 1e-4 --gan-d-beta1 0.5 `
+    --gan-pretrain-g-steps 5000 --gan-pretrain-d-steps 2000 `
+    --aug-resize-scale 1.5 --aug-scale-jitter 0.15 `
+    --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
+    --max-loss-spike-ratio 10.0 `
+    --checkpoint-every 5000 --sample-panel-steps 20 `
+    --num-workers 8 `
+    --wandb --wandb-project nanoWarp `
+    --wandb-run-name exp21_nogan_lpips_noenc_1k_256px_20k `
+    --wandb-tags "flow,no-encoder,lpips,gan,patch-gan,nogan-phased,bf16,1k-dataset,256px,exp21" `
+    --outdir out/exp21_nogan_lpips_noenc_1k_256px_20k
+```
+
+**Alternative: resume from exp14v2's pretrained G.** If we want to skip
+phase 1 (since exp14v2's checkpoint is already an LPIPS-pretrained G),
+we can launch with `--resume out/exp14v2_*/model.pt --gan-pretrain-g-steps 0
+--gan-pretrain-d-steps 2000 --steps 22000`. But: exp14v2's cosine LR is
+already at lr_min (1e-5) at step 40k, so the resume must override the
+LR schedule (drop `--lr-cosine`, set `--lr 1e-4 --lr-warmup-steps 100`)
+to actually train. Worth trying as a follow-up if the from-scratch exp21
+is promising.
+
+**Why this is now the highest-priority experiment:**
+
+After exp17/exp16 confirmed that VGG content + Gram alone doesn't beat
+LPIPS-only, the "fastai had a richer aux loss" hypothesis collapses.
+What's left is the **discriminator** — which directly attacks the
+shape-simplicity failure mode by saying "this output looks too simple
+to be real" in a learnable, per-image way that no static perceptual
+loss can replicate. This is exactly what the pix2pix lineage (pix2pix
+→ AnimeGAN → AnimeGANv3) relies on for crisp stylization quality.
+
+**Tuning notes for the launch:**
+- Start with `--gan-weight 0.1` (auxiliary regularizer, not primary
+  signal). If outputs look unchanged from exp14v2, raise to 0.3 or 0.5.
+  If outputs look unstable / artifact-laden, lower to 0.05 or kill.
+- Watch `d_real_score` and `d_fake_score` in wandb. Healthy training:
+  both drift toward small positives/negatives but stay within ~±2.
+  If `d_real_score` → +1.0 and `d_fake_score` → -1.0 with no movement,
+  D has won (no useful G gradient). If they oscillate wildly, λ_gan
+  is too high.
+- D updates happen every step (1:1 ratio with G). If D is winning too
+  hard later, we could go 1:2 (D every other step) — currently not
+  exposed as a flag, but easy to add.
+
+Predictions:
+- If exp21 visually shows crisper shapes / more detail than exp14v2 →
+  the "GAN drives shape complexity" hypothesis holds, *and* the NoGAN
+  phasing was what fixed the grid-artifact failure of vanilla exp20.
+  exp21 becomes the new recipe.
+- If exp21 ≈ exp14v2 visually + slight metric improvement → GAN helps
+  but is not transformative. Worth keeping at low weight.
+- If exp21 hurts metrics or shows training instability → either λ_gan
+  is mis-tuned (drop to 0.05), or NoGAN phasing alone wasn't enough
+  to stabilise (would need longer phase 2 or smaller D).
+- If exp21 *also* shows grid artifacts → PatchGAN's receptive field
+  itself is the culprit. Try `--gan-d-layers 2` (smaller receptive
+  field, ~34×34 instead of 70×70) or revisit the GAN approach entirely.
+
+#### Original vanilla-GAN exp20 spec preserved below (for diff vs the NoGAN-phased exp21 launch above)
 
 Triggered by visual inspection finding **shape simplicity** in our outputs:
 crisp lines where they exist, but fewer of them than the target. The model
@@ -1172,7 +1638,7 @@ losses can't.
   shape-simplicity issue at lower complexity cost.
 - GAN training is real engineering and we should defer it until we know
   the simpler levers can't get there.
-- This spec exists so we know what "exp16" means if we need to escalate.
+- This spec exists so we know what "exp20" means if we need to escalate.
 
 ```powershell
 # (sketch only — implementation TBD)
@@ -1187,8 +1653,9 @@ python scripts/train.py img2img-v1 data/photo2anime `
     --grad-clip-norm 1.0 --lr-warmup-steps 500 --lr-cosine --lr-min 1e-5 `
     --checkpoint-every 5000 --sample-panel-steps 20 `
     --num-workers 8 `
-    --wandb --wandb-tags "flow,no-encoder,lpips,gan,exp16" `
-    --outdir out/exp16_gan_noenc_attn832_bf16_mc88_30k
+    --wandb --wandb-tags "flow,no-encoder,lpips,gan,exp20" `
+    --wandb-run-name exp20_gan_noenc_attn832_bf16_mc88_30k `
+    --outdir out/exp20_gan_noenc_attn832_bf16_mc88_30k
 ```
 
 Predictions:
@@ -1279,6 +1746,26 @@ implement exp16 (GAN aux). Otherwise, exp14 is plausibly the
 ---
 
 ## Known bugs / lessons
+
+- **2026-05-11 lesson: vanilla GAN-from-scratch collapses to grid
+  artifacts (exp20).** First exp20 used PatchGAN + hinge loss + spectral
+  norm with `--gan-weight 0.1`, both G and D starting from random init
+  and updating from step 1. Result: visually plausible 70-pixel patches
+  that didn't tile coherently — periodic grid-like artifacts at the
+  PatchGAN receptive-field scale. The training loop "succeeded" by loss
+  numbers but the output was unusable.
+  Root cause: random D produces meaningless gradient direction for G
+  in the early steps. G wanders into a "fool the discriminator
+  per-patch" attractor before learning the basic photo→anime mapping.
+  Once stuck, alternating updates can't escape.
+  Fix: fastai's three-phase NoGAN approach. Phase 1 trains G on
+  perceptual loss alone (G learns the task). Phase 2 trains D alone on
+  (real, current-G-output) pairs (D calibrates). Phase 3 starts
+  alternating G+D with a sensible starting point.
+  See exp21 spec; flags `--gan-pretrain-g-steps` and
+  `--gan-pretrain-d-steps`.
+
+
 
 - **2026-05-10 bug: LPIPS aux silently disabled when FeatureLoss flags
   weren't set.** Introduced during the FeatureLoss wiring. The
