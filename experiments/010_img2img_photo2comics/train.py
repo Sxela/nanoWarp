@@ -153,6 +153,11 @@ def parse_args():
                    help="Phase 2 (fastai NoGAN): after G pretrain, freeze G for M steps while D "
                         "trains alone on (real, current-G-output) pairs. Calibrates D before "
                         "alternating GAN. 0 = skip phase 2 (D starts fresh in phase 3).")
+    p.add_argument("--gan-adaptive-switch", action="store_true",
+                   help="In the full GAN phase, adaptively decide who to train each step: "
+                        "update G-adv if g_gan_ema >= d_loss_ema (G is losing), update D if "
+                        "d_loss_ema >= g_gan_ema (D is losing). Prevents either from dominating. "
+                        "FastAI-style adaptive alternation. EMA alpha=0.1.")
     p.add_argument("--aug-resize-scale", type=float, default=1.10,
                    help="Intermediate resize ratio in PairedImageAugment before random crop. "
                         "1.10 = 10%% extra room (default, conservative). 1.5-2.0 = aggressive zoom-crop, "
@@ -348,7 +353,12 @@ def main():
         d_params = sum(p.numel() for p in discriminator.parameters())
         print(f"discriminator PatchGAN ch={args.gan_d_channels} layers={args.gan_d_layers}  "
               f"params={d_params:,}  d_lr={args.gan_d_lr}  d_beta1={args.gan_d_beta1}  "
-              f"gan_weight={args.gan_weight}")
+              f"gan_weight={args.gan_weight}"
+              + ("  adaptive_switch=True" if args.gan_adaptive_switch else ""))
+    # EMA loss trackers for adaptive G/D switching (used only when --gan-adaptive-switch)
+    _g_gan_ema: float = 2.0  # initialise at hinge equilibrium
+    _d_loss_ema: float = 2.0
+    _gan_ema_alpha: float = 0.1
 
     feature_loss_fn = None
     if args.feature_content_weight > 0 or args.feature_style_weight > 0:
@@ -437,12 +447,19 @@ def main():
                 loss = loss + feature_total
             g_gan_loss = torch.tensor(0.0, device=device)
             phase = gan_phase_at(step, args, discriminator)
-            # GAN term enters G's loss only in the "full" phase. During "g_pretrain"
-            # we train G on LPIPS/feature only. During "d_pretrain" G is frozen below.
-            if phase == "full":
+            # Adaptive switch: in full phase, only apply G-adv gradient if G is losing more.
+            _train_g_adv = (phase == "full") and (
+                not args.gan_adaptive_switch or _g_gan_ema >= _d_loss_ema
+            )
+            if _train_g_adv:
                 d_fake_for_g = discriminator(source, x0_hat)
                 g_gan_loss = hinge_g_loss(d_fake_for_g)
                 loss = loss + args.gan_weight * g_gan_loss
+            elif phase == "full":
+                # Compute for logging only — no gradient flows to G.
+                with torch.no_grad():
+                    d_fake_for_g = discriminator(source, x0_hat)
+                    g_gan_loss = hinge_g_loss(d_fake_for_g)
 
         # Safety: skip backward/step if loss is non-finite or a huge spike vs recent average.
         loss_val = float(loss.item())
@@ -498,10 +515,14 @@ def main():
 
         # D update — happens in phases 2 (d_pretrain) and 3 (full). Skipped in
         # phase 1 (g_pretrain) since D doesn't exist conceptually yet.
+        # In adaptive mode, D is only updated in full phase when D is losing (d_loss_ema >= g_gan_ema).
+        _train_d = (phase == "d_pretrain") or (
+            phase == "full" and (not args.gan_adaptive_switch or _d_loss_ema >= _g_gan_ema)
+        )
         d_loss_val = 0.0
         d_real_score = 0.0
         d_fake_score = 0.0
-        if discriminator is not None and phase in ("d_pretrain", "full"):
+        if discriminator is not None and _train_d:
             with amp_ctx:
                 d_real = discriminator(source, target)
                 d_fake_for_d = discriminator(source, x0_hat.detach())
@@ -519,12 +540,18 @@ def main():
                 # Skip D step if its loss is NaN/Inf.
                 opt_d.zero_grad(set_to_none=True)
 
+        # Update adaptive EMA trackers whenever we're in full GAN phase.
+        if discriminator is not None and phase == "full" and args.gan_adaptive_switch:
+            _g_gan_ema = (1 - _gan_ema_alpha) * _g_gan_ema + _gan_ema_alpha * float(g_gan_loss)
+            _d_loss_ema = (1 - _gan_ema_alpha) * _d_loss_ema + _gan_ema_alpha * d_loss_val
+
         losses.append(loss_val)
         if step % args.log_every == 0 or step == 1:
             extra = f" | grad_norm {grad_norms[-1]:.4f}" if grad_norms else ""
             feat_extra = f" | feat_c {float(feature_content):.4f} feat_s {float(feature_style):.6f}" if feature_loss_fn is not None else ""
             gan_extra = (f" | phase {phase} g_gan {float(g_gan_loss):.4f} d_loss {d_loss_val:.4f} "
                          f"d_real {d_real_score:+.3f} d_fake {d_fake_score:+.3f}"
+                         + (f" ema_g={_g_gan_ema:.3f} ema_d={_d_loss_ema:.3f}" if args.gan_adaptive_switch else "")
                          if discriminator is not None else "")
             print(
                 f"step {step:5d} | lr {cur_lr:.6f} | t in [{t_low},{t_high}) | "

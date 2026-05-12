@@ -1783,6 +1783,228 @@ implement exp16 (GAN aux). Otherwise, exp14 is plausibly the
   2. New flag only (e.g. `--feature-content-weight 1.0 --feature-style-weight 5000`).
   3. Both together.
 
+---
+
+## exp14v2 — 1k dataset, 256px, no-encoder, attn(16,32,64), bf16, mc88, LPIPS-squeeze, 40k steps
+
+**Status: DONE 2026-05-11**
+
+Best run so far at the time. Key results (val on 1k val set, 256px):
+
+| step | lpips_sq | lpips_vgg | ssim  |
+|------|----------|-----------|-------|
+| 5k   | 0.177    | —         | 0.632 |
+| 10k  | 0.177    | —         | 0.654 |
+| 20k  | 0.182    | 0.248     | 0.674 |
+| 40k  | 0.183    | 0.240     | 0.686 |
+
+**Pattern**: LPIPS plateaus early (~10k), SSIM keeps climbing through 40k.
+exp12 baseline on same val set: lpips_sq=0.190, ssim=0.635 → 1k dataset helps.
+
+---
+
+## exp15 — exp14v2 recipe + VGG content L1 + Gram style L1 (fastai FeatureLoss)
+
+**Status: DONE 2026-05-11**
+
+Settings: same as exp14v2 20k but `--feature-content-weight 1.0 --feature-style-weight 5000 --feature-loss-layers "8,15,22"` + `--lpips-weight 0.2` + `--source-dropout 0.15`, `attn-resolutions "8,16,32"` (not 16,32,64).
+
+Results (20k, dual LPIPS val):
+- lpips_squeeze=0.162, lpips_vgg=0.293, ssim=0.631
+
+**Finding**: squeeze improved 11.5% vs exp14v2 20k, but VGG *degraded* (+18%).
+Style-vs-structure tradeoff: Gram style loss pushes texture statistics away from
+pixel-accurate targets. SqueezeNet is insensitive to this drift; VGG catches it.
+The squeeze metric was overfitting to the style-transfer distribution.
+
+---
+
+## exp16 — fastai per-layer feature weights [5,15,2], no LPIPS
+
+**Status: DONE 2026-05-11**
+
+Settings: `--feature-content-weight 0.045 --feature-style-weight 227 --feature-loss-layers "8,15,22" --feature-content-layer-weights "5,15,2" --feature-style-layer-weights "5,15,2" --lpips-weight 0`, 1k dataset, 256px, attn(16,32,64).
+
+Results: lpips_sq=0.167, lpips_vgg=0.314, ssim=0.610
+
+**Conclusion**: fastai layer weighting doesn't fix the VGG-path problem. All
+VGG content+Gram runs (exp15, exp16, exp17) lose to plain LPIPS-only on lpips_vgg
+and SSIM. VGG content+Gram is not the right aux loss for this task.
+
+---
+
+## exp17 — VGG content+Gram only, no LPIPS
+
+**Status: DONE 2026-05-11**
+
+Settings: exp15 but `--lpips-weight 0`.
+
+Results: lpips_sq=0.189, lpips_vgg=0.337, ssim=0.600
+
+**Conclusion**: Removing LPIPS from exp15 makes everything worse. LPIPS was not
+redundant — it was load-bearing. VGG feature loss alone is the worst of the three.
+
+---
+
+## VGG feature loss ablation summary (exp15/16/17)
+
+| model | lpips_sq | lpips_vgg | ssim  | notes |
+|-------|----------|-----------|-------|-------|
+| exp14v2 20k (LPIPS-sq only) | 0.182 | 0.248 | 0.674 | baseline |
+| exp15 (LPIPS-sq + VGG feat) | 0.162 | 0.293 | 0.631 | sq improved, vgg worse |
+| exp16 (fastai weights, no LPIPS) | 0.167 | 0.314 | 0.610 | layer weights don't help |
+| exp17 (VGG feat only) | 0.189 | 0.337 | 0.600 | worst overall |
+
+**Verdict**: VGG content+Gram path is genuinely worse for photo→anime. The Gram
+style term pushes texture statistics in directions that SqueezeNet rewards but
+VGG LPIPS (the honest metric) penalises. Drop this axis.
+
+---
+
+## exp20 — GAN aux, gan-weight 0.1, no NoGAN phasing
+
+**Status: KILLED 2026-05-11 (overcooked)**
+
+D dominated from the start. At step 10k: d_real +1.5→+2.2, d_fake -1.5→-2.8.
+In-loop LPIPS stuck at 0.35–0.41 (vs 0.06 healthy). G couldn't fool D at all.
+
+**Lesson**: GAN without NoGAN phasing collapses when D is stronger than G.
+
+---
+
+## exp21 — GAN aux + NoGAN phases (5k G pretrain, 2k D pretrain), gan-weight 0.1
+
+**Status: DONE 2026-05-11**
+
+Results: lpips_sq=0.299, lpips_vgg=0.489, ssim=0.409 — catastrophic.
+
+Phase 3 (full GAN) still had D dominating by end: d_real +1.9, d_fake -2.4,
+g_gan 1.5–2.4. The NoGAN phasing helped at step 7k but D won over 13k adversarial
+steps. `gan_weight=0.1` is too strong.
+
+---
+
+## exp21b — GAN aux + NoGAN phases, gan-weight 0.005
+
+**Status: DONE 2026-05-11**
+
+Results: lpips_sq=0.187, lpips_vgg=0.284, ssim=0.640
+
+Training stable (D scores near zero), but gan-weight too weak to improve over
+exp14v2. GAN at 0.005 adds adversarial noise without enough signal.
+
+---
+
+## exp21c — GAN aux + NoGAN phases + adaptive switching, gan-weight 0.1
+
+**Status: DONE 2026-05-11**
+
+Implemented `--gan-adaptive-switch`: in full phase, update G-adv if
+`g_gan_ema >= d_loss_ema`, update D if `d_loss_ema >= g_gan_ema`. EMA alpha=0.1.
+
+Results: lpips_sq=0.211, lpips_vgg=0.320, ssim=0.606
+
+Training stable (ema_g≈0.68, ema_d≈0.89 at end — balanced). But val metrics
+still worse than exp14v2. G learned to fool D on train distribution but doesn't
+generalise to val. Observation: GAN helps texture/colour but loses facial detail.
+
+**GAN conclusion**: All GAN variants (exp20/21/21b/21c) trail exp14v2 on honest
+metrics. Balanced training (adaptive switch) is better than fixed phases, but
+adversarial pressure at any tested weight hurts reconstruction quality vs pure
+LPIPS. GAN may help qualitatively (texture, colour) even when metrics regress.
+Parked pending further investigation.
+
+---
+
+## exp22 / exp22b — exp14v2 x4 model size (mc=176, resize_conv / pixel_shuffle)
+
+**Status: KILLED 2026-05-11 (grid artifacts)**
+
+mc=176 → 175M params (resize_conv) or 259M (pixel_shuffle). Both showed
+repeating periodic artifacts at ~4k steps. Root cause: upsampling channels
+(704→1408) too strong at this capacity, imprinting patterns.
+Additionally, model converged to identity mapping (copy source) — too much
+capacity for 908 training pairs at 256px.
+
+**Lesson**: mc=176 is above the capacity ceiling for this dataset. mc=88 (44M)
+is the practical limit at 1k pairs, 256px.
+
+---
+
+## exp23 — exp14v2 20k + LPIPS-VGG backbone (--lpips-aux-net vgg)
+
+**Status: DONE 2026-05-11**
+
+Single change from exp14v2: swap LPIPS training backbone from squeeze to vgg.
+Val metric (squeeze) stays for continuity.
+
+Results: lpips_sq=0.127, lpips_vgg=0.234, ssim=0.689
+
+**Biggest single-run improvement of the project.** −30% lpips_sq vs exp14v2 20k,
+−3% lpips_vgg vs exp14v2 40k, SSIM matches exp14v2 40k in only 20k steps.
+VGG LPIPS as training loss forces the model to respect mid-level feature structure
+(relu2_2/relu3_3/relu4_3) — exactly what matters for facial detail and edge quality.
+
+**New baseline**: exp23 replaces exp14v2 as the reference recipe.
+
+---
+
+## exp24 — exp23 + native-res crops (aug-resize-scale 4.0, no zoom)
+
+**Status: DONE 2026-05-11**
+
+Hypothesis: downscaling 1024px→281px before cropping (default scale=1.10)
+blurs stroke widths. Scale=4.0 keeps 1024px native, random crop 256px.
+
+Results: lpips_sq=0.273, lpips_vgg=0.449, ssim=0.537 — much worse than exp23.
+
+Root cause: 256 from 1024 = 1/16th image area per crop. High crop variance:
+easy (background) crops dominate early training, then model hits hard (face)
+crops at step ~4k and needs 6k steps to recover. Wasted half the training budget.
+
+**Lesson**: native-res crops are too sparse for 256px training at 1k pairs. Need
+larger effective receptive field per crop. scale=2.0 (512→256 crop, 1/4 image
+area) is the planned fix (exp24b).
+
+---
+
+## exp24b — exp23 + scale=2.0 crops (resize 1024→512, random crop 256)
+
+**Status: RUNNING 2026-05-11**
+
+Hypothesis: scale=2.0 gives consistent stroke width (2x downscale from native)
+with manageable crop variance (1/4 image area vs 1/16 for scale=4.0 or ~full
+image for scale=1.10). Should recover exp23 quality with better stroke fidelity.
+
+---
+
+## dual-LPIPS metric (2026-05-11)
+
+validate.py now reports both `mean_lpips_squeeze_sampled` (continuity with
+exp01–15) and `mean_lpips_vgg_sampled` (out-of-loop honest check). 28% gap
+observed on exp08-noenc (0.163 sq vs 0.209 vgg). Always report both going forward.
+
+---
+
+## Known bugs / lessons
+
+- **2026-05-11 lesson: GAN weight 0.1 dominates over LPIPS 0.2.**
+  At hinge equilibrium g_gan~1.5, contribution = 0.1×1.5 = 0.15 vs LPIPS
+  contribution ~0.2×0.06 = 0.012. GAN is 12× larger than LPIPS in practice.
+  For GAN as a weak regulariser, target gan_weight so that g_gan contribution
+  ≈ LPIPS contribution, i.e. gan_weight ≈ 0.012/1.5 ≈ 0.008. 0.005 is in range.
+
+- **2026-05-11 lesson: native-res crops (scale=4.0) cause 6k-step loss spike
+  recovery.** 256px crops from 1024px images capture 1/16 image area — too
+  sparse. Background-heavy crops dominate early training; face-heavy crops
+  appear later and cause a loss jump. Use scale=2.0 (1/4 area) as baseline for
+  1024px source data.
+
+- **2026-05-11 lesson: mc=176 hits capacity ceiling at 908 pairs/256px.**
+  Both resize_conv and pixel_shuffle upsamplers showed periodic artifacts.
+  Model converges to identity mapping. mc=88 (44M params) is the practical
+  limit for this dataset scale.
+
 ## Open follow-ups
 
 - ~~Compute "source-as-prediction" baseline SSIM/LPIPS.~~ **Done 2026-05-10.**
