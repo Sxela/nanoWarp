@@ -8,6 +8,8 @@ from torch import nn
 import torch.nn.functional as F
 from torch.hub import load_state_dict_from_url
 
+from .colorspace import linear_to_srgb
+
 
 RESNET18_URL = "https://download.pytorch.org/models/resnet18-f37072fd.pth"
 
@@ -76,10 +78,17 @@ class SourceEncoder(nn.Module):
         self.layer3 = nn.Sequential(BasicBlock(128, 256, stride=2), BasicBlock(256, 256))
         self.layer4 = nn.Sequential(BasicBlock(256, 512, stride=2), BasicBlock(512, 512))
 
+        self._frozen_stage_names: tuple[str, ...] = tuple(freeze_stages) if freeze_stages else ()
+
         if pretrained:
             self.load_pretrained_weights()
         if freeze_stages:
             self.freeze_stages(freeze_stages)
+
+    def _stage_modules(self, stage: str):
+        if stage == "stem":
+            return [self.conv1, self.bn1]
+        return [getattr(self, stage)]
 
     def load_pretrained_weights(self):
         try:
@@ -93,14 +102,19 @@ class SourceEncoder(nn.Module):
             warnings.warn(f"Falling back to random SourceEncoder init; failed to load ResNet18 weights: {e}")
 
     def freeze_stages(self, stages: tuple[str, ...] = ("stem", "layer1")):
+        self._frozen_stage_names = tuple(stages)
         for stage in stages:
-            if stage == "stem":
-                modules = [self.conv1, self.bn1]
-            else:
-                modules = [getattr(self, stage)]
-            for module in modules:
+            for module in self._stage_modules(stage):
                 for param in module.parameters():
                     param.requires_grad = False
+                module.eval()
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        for stage in self._frozen_stage_names:
+            for module in self._stage_modules(stage):
+                module.eval()
+        return self
 
     def trainable_summary(self) -> dict[str, bool]:
         return {
@@ -197,6 +211,43 @@ class Upsample(nn.Module):
         return self.op(x)
 
 
+def icnr_init(weight: torch.Tensor, scale: int = 2, init=nn.init.kaiming_normal_) -> None:
+    """ICNR (Aitken et al. 2017): initialise a sub-pixel conv so that PixelShuffle
+    produces the same output as nearest-neighbor upsampling at step 0. This is what
+    keeps PixelShuffle from emitting a checkerboard pattern early in training.
+
+    `weight` shape is (out_ch, in_ch, kH, kW) with out_ch = base_ch * scale**2.
+    """
+    out_ch, in_ch = weight.shape[:2]
+    spatial = weight.shape[2:]
+    base_ch = out_ch // (scale ** 2)
+    sub = torch.empty(base_ch, in_ch, *spatial, device=weight.device, dtype=weight.dtype)
+    init(sub)
+    sub = sub.repeat_interleave(scale ** 2, dim=0)
+    with torch.no_grad():
+        weight.copy_(sub)
+
+
+class PixelShuffleUpsample(nn.Module):
+    """Sub-pixel conv upsampling with ICNR init.
+
+    Drop-in replacement for `Upsample`: same in_ch == out_ch, 2x spatial.
+    Tends to produce sharper edges than resize+conv in image-translation tasks
+    (cf. fastai's UNet). The cost is one extra hyperparameter (the init).
+    """
+
+    def __init__(self, channels: int, scale: int = 2):
+        super().__init__()
+        self.conv = nn.Conv2d(channels, channels * (scale ** 2), 3, padding=1)
+        self.shuffle = nn.PixelShuffle(scale)
+        icnr_init(self.conv.weight, scale=scale)
+        if self.conv.bias is not None:
+            nn.init.zeros_(self.conv.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.shuffle(self.conv(x))
+
+
 class Img2ImgDiffusionUNet(nn.Module):
     """Pixel-space conditional diffusion skeleton for photo -> comics."""
 
@@ -209,66 +260,144 @@ class Img2ImgDiffusionUNet(nn.Module):
         pretrained_source_encoder: bool = True,
         freeze_source_stages: tuple[str, ...] = ("stem", "layer1"),
         source_in_stem: bool = False,
+        use_source_encoder: bool = True,
+        upsample_type: str = "resize_conv",
+        attn_resolutions: tuple[int, ...] = (8,),
+        image_size: int = 128,
+        color_space: str = "srgb",
     ):
         super().__init__()
+        if upsample_type not in ("resize_conv", "pixel_shuffle"):
+            raise ValueError(f"upsample_type must be 'resize_conv' or 'pixel_shuffle', got {upsample_type!r}")
+        if color_space not in ("srgb", "linear_rgb"):
+            raise ValueError(f"color_space must be 'srgb' or 'linear_rgb', got {color_space!r}")
+        if not use_source_encoder:
+            source_in_stem = True
+        self.use_source_encoder = use_source_encoder
         self.source_in_stem = source_in_stem
-        self.source_encoder = SourceEncoder(
-            in_ch=3,
-            pretrained=pretrained_source_encoder,
-            freeze_stages=freeze_source_stages,
-        )
+        self.upsample_type = upsample_type
+        self.attn_resolutions = tuple(sorted(set(int(r) for r in attn_resolutions)))
+        self.image_size = image_size
+        self.color_space = color_space
+        if use_source_encoder:
+            self.source_encoder = SourceEncoder(
+                in_ch=3,
+                pretrained=pretrained_source_encoder,
+                freeze_stages=freeze_source_stages,
+            )
+        else:
+            self.source_encoder = None
         self.time_mlp = TimeMLP(time_dim)
 
+        # UNet widths are multiples of model_ch (base = 64 in the original design).
+        # Scaling model_ch scales the whole UNet by the same factor.
+        c1 = model_ch          # level 1 (full res)
+        c2 = model_ch * 2      # level 2
+        c3 = model_ch * 4      # level 3
+        c4 = model_ch * 4      # level 4
+        cm = model_ch * 8      # bottleneck
+        self.unet_channels = (c1, c2, c3, c4, cm)
+
         stem_in_ch = in_ch + 3 if source_in_stem else in_ch
-        self.in_conv = nn.Conv2d(stem_in_ch, model_ch, 3, padding=1)
+        self.in_conv = nn.Conv2d(stem_in_ch, c1, 3, padding=1)
 
-        self.down1 = ResBlock(model_ch, 64, time_dim * 4)
-        self.fuse1 = FuseBlock(64, 64)
-        self.ds1 = Downsample(64)
+        self.down1 = ResBlock(c1, c1, time_dim * 4)
+        self.ds1 = Downsample(c1)
 
-        self.down2 = ResBlock(64, 128, time_dim * 4)
-        self.fuse2 = FuseBlock(128, 64)
-        self.ds2 = Downsample(128)
+        self.down2 = ResBlock(c1, c2, time_dim * 4)
+        self.ds2 = Downsample(c2)
 
-        self.down3 = ResBlock(128, 256, time_dim * 4)
-        self.fuse3 = FuseBlock(256, 128)
-        self.ds3 = Downsample(256)
+        self.down3 = ResBlock(c2, c3, time_dim * 4)
+        self.ds3 = Downsample(c3)
 
-        self.down4 = ResBlock(256, 256, time_dim * 4)
-        self.fuse4 = FuseBlock(256, 256)
-        self.ds4 = Downsample(256)
+        self.down4 = ResBlock(c3, c4, time_dim * 4)
+        self.ds4 = Downsample(c4)
 
-        self.mid1 = ResBlock(256, 512, time_dim * 4)
-        self.mid_fuse = FuseBlock(512, 512)
-        self.mid_attn = BottleneckAttention(512)
-        self.mid2 = ResBlock(512, 512, time_dim * 4)
+        self.mid1 = ResBlock(c4, cm, time_dim * 4)
+        self.mid_attn = BottleneckAttention(cm)
+        self.mid2 = ResBlock(cm, cm, time_dim * 4)
 
-        self.up4 = Upsample(512)
-        self.dec4 = ResBlock(512 + 256, 256, time_dim * 4)
-        self.up3 = Upsample(256)
-        self.dec3 = ResBlock(256 + 256, 256, time_dim * 4)
-        self.up2 = Upsample(256)
-        self.dec2 = ResBlock(256 + 128, 128, time_dim * 4)
-        self.up1 = Upsample(128)
-        self.dec1 = ResBlock(128 + 64, 64, time_dim * 4)
+        # Encoder-side resolutions for the four levels at this image_size.
+        # h1 stays at image_size, then each ds halves.
+        level_resolutions = (
+            image_size,         # after down1 (level 1)
+            image_size // 2,    # after down2 (level 2)
+            image_size // 4,    # after down3 (level 3)
+            image_size // 8,    # after down4 (level 4)
+        )
+        level_channels = (c1, c2, c3, c4)
+        attn_set = set(self.attn_resolutions)
+        # Conditionally create per-level self-attention. None when not requested,
+        # which keeps the state_dict empty and old checkpoints loadable.
+        # The bottleneck attention (8x8 by default) is mid_attn above and is
+        # always present.
+        self.attn1 = BottleneckAttention(level_channels[0]) if level_resolutions[0] in attn_set else None
+        self.attn2 = BottleneckAttention(level_channels[1]) if level_resolutions[1] in attn_set else None
+        self.attn3 = BottleneckAttention(level_channels[2]) if level_resolutions[2] in attn_set else None
+        self.attn4 = BottleneckAttention(level_channels[3]) if level_resolutions[3] in attn_set else None
 
-        self.out_norm = nn.GroupNorm(8, 64)
-        self.out_conv = nn.Conv2d(64, out_ch, 3, padding=1)
+        if use_source_encoder:
+            # SourceEncoder (ResNet18) feature widths are fixed: 64, 64, 128, 256, 512.
+            self.fuse1 = FuseBlock(c1, 64)
+            self.fuse2 = FuseBlock(c2, 64)
+            self.fuse3 = FuseBlock(c3, 128)
+            self.fuse4 = FuseBlock(c4, 256)
+            self.mid_fuse = FuseBlock(cm, 512)
+        else:
+            self.fuse1 = self.fuse2 = self.fuse3 = self.fuse4 = self.mid_fuse = None
+
+        UpModule = PixelShuffleUpsample if upsample_type == "pixel_shuffle" else Upsample
+        self.up4 = UpModule(cm)
+        self.dec4 = ResBlock(cm + c4, c3, time_dim * 4)
+        self.up3 = UpModule(c3)
+        self.dec3 = ResBlock(c3 + c3, c3, time_dim * 4)
+        self.up2 = UpModule(c3)
+        self.dec2 = ResBlock(c3 + c2, c2, time_dim * 4)
+        self.up1 = UpModule(c2)
+        self.dec1 = ResBlock(c2 + c1, c1, time_dim * 4)
+
+        self.out_norm = nn.GroupNorm(8, c1)
+        self.out_conv = nn.Conv2d(c1, out_ch, 3, padding=1)
 
     def forward(self, source: torch.Tensor, noisy_target: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
-        src_feats = self.source_encoder(source)
         t_emb = self.time_mlp(t)
 
         stem_input = torch.cat([source, noisy_target], dim=1) if self.source_in_stem else noisy_target
         x0 = self.in_conv(stem_input)
 
-        h1 = self.fuse1(self.down1(x0, t_emb), src_feats[0])
-        h2 = self.fuse2(self.down2(self.ds1(h1), t_emb), src_feats[1])
-        h3 = self.fuse3(self.down3(self.ds2(h2), t_emb), src_feats[2])
-        h4 = self.fuse4(self.down4(self.ds3(h3), t_emb), src_feats[3])
-
-        mid = self.mid1(self.ds4(h4), t_emb)
-        mid = self.mid_fuse(mid, src_feats[4])
+        if self.use_source_encoder:
+            # Source encoder is ImageNet-pretrained ResNet18 → expects sRGB input.
+            # Convert from linear RGB at the boundary if we're training in linear.
+            encoder_input = linear_to_srgb(source).clamp(0, 1) if self.color_space == "linear_rgb" else source
+            src_feats = self.source_encoder(encoder_input)
+            h1 = self.fuse1(self.down1(x0, t_emb), src_feats[0])
+            if self.attn1 is not None:
+                h1 = self.attn1(h1)
+            h2 = self.fuse2(self.down2(self.ds1(h1), t_emb), src_feats[1])
+            if self.attn2 is not None:
+                h2 = self.attn2(h2)
+            h3 = self.fuse3(self.down3(self.ds2(h2), t_emb), src_feats[2])
+            if self.attn3 is not None:
+                h3 = self.attn3(h3)
+            h4 = self.fuse4(self.down4(self.ds3(h3), t_emb), src_feats[3])
+            if self.attn4 is not None:
+                h4 = self.attn4(h4)
+            mid = self.mid1(self.ds4(h4), t_emb)
+            mid = self.mid_fuse(mid, src_feats[4])
+        else:
+            h1 = self.down1(x0, t_emb)
+            if self.attn1 is not None:
+                h1 = self.attn1(h1)
+            h2 = self.down2(self.ds1(h1), t_emb)
+            if self.attn2 is not None:
+                h2 = self.attn2(h2)
+            h3 = self.down3(self.ds2(h2), t_emb)
+            if self.attn3 is not None:
+                h3 = self.attn3(h3)
+            h4 = self.down4(self.ds3(h3), t_emb)
+            if self.attn4 is not None:
+                h4 = self.attn4(h4)
+            mid = self.mid1(self.ds4(h4), t_emb)
         mid = self.mid_attn(mid)
         mid = self.mid2(mid, t_emb)
 
