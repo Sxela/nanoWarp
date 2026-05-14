@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.hub import load_state_dict_from_url
 
 from .colorspace import linear_to_srgb
+from .dit import DiTBottleneck
 from .source_pyramid import FiLM, SourcePyramid
 from .temporal import TemporalAttn
 
@@ -271,6 +272,9 @@ class Img2ImgDiffusionUNet(nn.Module):
         mask_channels: int = 0,
         use_source_pyramid: bool = False,
         use_decoder_attn: bool = False,
+        use_dit_bottleneck: bool = False,
+        num_dit_blocks: int = 4,
+        dit_mlp_ratio: float = 4.0,
     ):
         super().__init__()
         if upsample_type not in ("resize_conv", "pixel_shuffle"):
@@ -289,6 +293,7 @@ class Img2ImgDiffusionUNet(nn.Module):
         self.mask_channels = mask_channels
         self.use_source_pyramid = use_source_pyramid
         self.use_decoder_attn = use_decoder_attn
+        self.use_dit_bottleneck = use_dit_bottleneck
         self._temporal_num_frames: int = 1  # set via set_temporal_frames()
         if use_source_encoder:
             self.source_encoder = SourceEncoder(
@@ -335,9 +340,25 @@ class Img2ImgDiffusionUNet(nn.Module):
         self.down4 = ResBlock(c3, c4, time_dim * 4)
         self.ds4 = Downsample(c4)
 
+        # Bottleneck. `mid1` always projects c4 → cm. `mid_attn` and `mid2` are
+        # either the original conv-attn-conv stack OR replaced by a stack of
+        # DiT blocks (use_dit_bottleneck=True). The DiT stack is identity at
+        # init via adaLN-zero, so a non-DiT checkpoint loads cleanly via
+        # strict=False when use_dit_bottleneck is flipped on.
         self.mid1 = ResBlock(c4, cm, time_dim * 4)
-        self.mid_attn = BottleneckAttention(cm)
-        self.mid2 = ResBlock(cm, cm, time_dim * 4)
+        if use_dit_bottleneck:
+            self.mid_attn = None
+            self.mid2 = None
+            self.dit_bottleneck = DiTBottleneck(
+                dim=cm,
+                t_emb_dim=time_dim * 4,
+                num_blocks=num_dit_blocks,
+                mlp_ratio=dit_mlp_ratio,
+            )
+        else:
+            self.mid_attn = BottleneckAttention(cm)
+            self.mid2 = ResBlock(cm, cm, time_dim * 4)
+            self.dit_bottleneck = None
 
         # Temporal attention — inserted after every encoder/bottleneck/decoder block.
         # AnimateDiff-style: all levels, zero-init gates → identity at init.
@@ -531,9 +552,15 @@ class Img2ImgDiffusionUNet(nn.Module):
             if self.attn4 is not None: h4 = self.attn4(h4)
             h4 = _ta(h4, self.tattn4)
             mid = self.mid1(self.ds4(h4), t_emb)
-        mid = self.mid_attn(mid)
-        mid = _ta(mid, self.tattn_mid)
-        mid = self.mid2(mid, t_emb)
+        if self.dit_bottleneck is not None:
+            # DiT replaces (mid_attn → mid2). tattn_mid still applied after
+            # spatial mixing, before the decoder upsweep, for temporal runs.
+            mid = self.dit_bottleneck(mid, t_emb)
+            mid = _ta(mid, self.tattn_mid)
+        else:
+            mid = self.mid_attn(mid)
+            mid = _ta(mid, self.tattn_mid)
+            mid = self.mid2(mid, t_emb)
 
         x = self.up4(mid)
         x = self.dec4(torch.cat([x, h4], dim=1), t_emb)

@@ -51,6 +51,7 @@ python3 experiments/010_img2img_photo2comics/train_exp32_prog512.py \
     --corrupt-jpeg-min 30 --corrupt-jpeg-prob 0.7 \
     --val-every 1000 --panel-every 1000 --checkpoint-every 5000 --best-every 1000 \
     --sample-steps 20 \
+    --exp-name exp33 \
     --wandb \
     --wandb-project nanoWarp \
     --wandb-run-name exp33_aug32stack_at_exp23_recipe \
@@ -62,7 +63,7 @@ echo "[exp33] training done. Running final val (25 batches, EMA, sample_steps=20
 
 python3 experiments/010_img2img_photo2comics/validate.py \
     data/photo2anime_1k/photo2anime_1k \
-    --checkpoint "$OUTDIR/model.pt" \
+    --checkpoint "$OUTDIR/exp33_model.pt" \
     --image-size 256 --batch-size 4 --max-batches 25 --sample-steps 20 --use-ema \
     --outdir "out/val_exp33_final_256px" \
     2>&1 | tee "out/val_exp33_final_256px.log"

@@ -2334,10 +2334,64 @@ Results: TBD.
 within each level — ResBlock → attn? → FiLM? → tattn? — and the exp35
 source pyramid + FiLM hooks).
 
-Next experiments (queued, contingent on exp34/35 results):
-- **exp36** — U-DiT bottleneck: replace `mid_attn` / `mid1` / `mid2` with
-  4–6 transformer blocks at the 16×16 level. Same param budget, different
-  long-range mixing.
+---
+
+## exp36 — exp33 recipe + DiT bottleneck
+
+**Status: WIRED 2026-05-14** (ready to launch after exp33/34/35 land)
+
+Replaces the convolutional bottleneck (`mid_attn` + `mid2 ResBlock`) with a
+stack of 4 DiT-XL-style transformer blocks operating on the flattened
+(H/16 × W/16, cm=704) token grid. `mid1` (the c4 → cm channel-widener
+ResBlock) is preserved upstream so the DiT stack always sees constant width.
+
+**Block structure** (per DiT block):
+- `LayerNorm` (elementwise_affine=False) → adaLN-zero modulation
+  (shift_msa, scale_msa, gate_msa from a single Linear(t_emb_dim → 6·D)
+  with zero-init weight and bias)
+- MHSA (qkv proj + scaled_dot_product_attention + out proj)
+- gated residual
+- `LayerNorm` → adaLN-zero modulation (shift_mlp, scale_mlp, gate_mlp)
+- MLP (Linear → GELU → Linear, hidden=4D)
+- gated residual
+
+Zero-init adaLN gates → block emits its input unchanged at step 0 →
+no-DiT checkpoints load cleanly via strict=False, identical at-init forward.
+
+**Positional embeddings**: 2D sinusoidal, size-agnostic so the same DiT
+stack works at the 8×8 / 16×16 / 32×32 bottleneck grids that arise from
+the 128 / 256 / 512px training phases.
+
+**Heads**: auto-picked to keep `head_dim` a Flash-attention-friendly
+power of 2. At cm=704: head_dim=64, num_heads=11.
+
+**Param cost**: ~28M added (49M → ~77M total). Outside "same param budget"
+territory — explicit choice to test maximum DiT capacity. Halve to ~14M
+with `--num-dit-blocks 2` if exp36 is competitive on quality but the param
+bloat is a problem for downstream temporal fine-tuning.
+
+**Recipe**: identical to exp33 except `--use-dit-bottleneck` (+ optional
+`--num-dit-blocks` and `--dit-mlp-ratio`).
+
+```bash
+WANDB_API_KEY=... bash scripts/run_exp36_dit_bottleneck_at_exp33_recipe.sh
+```
+
+Script: `scripts/run_exp36_dit_bottleneck_at_exp33_recipe.sh`
+Outdir: `out/exp36_dit_bottleneck_noenc_attn163264_bf16_mc88_256px_20k`
+
+Results: TBD.
+
+**Why DiT over windowed attention at higher resolutions**: the windowed-attn
+path (see [model_architecture.html](model_architecture.html) notes) would
+add spatial-attention coverage at 128/256px levels that aren't currently
+attended; DiT instead changes the *kind* of mixing at the bottleneck where
+attention is already happening. The captain's log discussion concluded that
+SD/SDXL conventionally skip full-res attention because the source-in-stem
+path already provides full-res spatial information, so adding higher-res
+attention is mostly buying high-frequency texture coherence rather than new
+spatial reasoning. DiT at the bottleneck is the "smarter mixing at the
+right resolution" direction instead.
 
 ---
 

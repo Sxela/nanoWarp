@@ -349,6 +349,14 @@ def parse_args():
                    help="Mirror encoder attn on the decoder side: BottleneckAttention "
                         "at the same resolutions (attn_resolutions) operating on decoder "
                         "output channels. ~SD/SDXL convention.")
+    p.add_argument("--use-dit-bottleneck", action="store_true",
+                   help="Replace (mid_attn + mid2) with a stack of DiT blocks at the "
+                        "bottleneck. mid1 still projects c4 → cm upstream. adaLN-zero "
+                        "init → identity at step 0.")
+    p.add_argument("--num-dit-blocks", type=int, default=4,
+                   help="Number of DiT blocks in the bottleneck stack (default 4).")
+    p.add_argument("--dit-mlp-ratio", type=float, default=4.0,
+                   help="MLP hidden ratio inside each DiT block (default 4.0).")
     # phase schedule overrides (end steps)
     p.add_argument("--phase1-end", type=int, default=5_000,   help="Last step of 128px phase")
     p.add_argument("--phase2-end", type=int, default=25_000,  help="Last step of 256px phase")
@@ -407,6 +415,10 @@ def parse_args():
     p.add_argument("--best-every", type=int, default=5_000,
                    help="Evaluate at this interval and save model_best.pt if val LPIPS improves")
     p.add_argument("--sample-steps", type=int, default=20)
+    p.add_argument("--exp-name", default="",
+                   help="Short experiment tag prepended to every saved output filename "
+                        "(e.g. 'exp33' → exp33_model.pt, exp33_panel_step_005000.png). "
+                        "Default '' = no prefix.")
     p.add_argument("--outdir", default="out/exp32_prog512")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", default="nanoWarp")
@@ -449,7 +461,8 @@ def run_val(ema_model, diffusion, val_loader, args, device, step, outdir, wandb)
     mean_ssim  = sum(ssim_vals)  / len(ssim_vals)
     print(f"[val] step={step}  lpips_sq={mean_lpips:.4f}  ssim={mean_ssim:.4f}")
 
-    with open(outdir / f"val_step{step:06d}.json", "w") as f:
+    fp = (args.exp_name + "_") if args.exp_name else ""
+    with open(outdir / f"{fp}val_step{step:06d}.json", "w") as f:
         json.dump({"step": step, "lpips_sq": mean_lpips, "ssim": mean_ssim}, f, indent=2)
 
     if wandb is not None:
@@ -473,8 +486,9 @@ def save_panel(ema_model, diffusion, val_loader, args, device, step, outdir):
         x = x + float(ts[j + 1] - ts[j]) * v
     samples = x.clamp(0, 1)
 
+    fp = (args.exp_name + "_") if args.exp_name else ""
     save_val_panel(source.cpu(), target.cpu(), samples.cpu(), samples.cpu(),
-                   outdir / f"panel_step_{step:06d}.png")
+                   outdir / f"{fp}panel_step_{step:06d}.png")
 
 
 @torch.no_grad()
@@ -500,8 +514,9 @@ def infer_nat1(ema_model, diffusion, args, device, step, outdir):
         result = x.clamp(0, 1)
 
         grid = torch.cat([source.cpu(), result.cpu()], dim=3)
-        TF.to_pil_image(grid[0]).save(outdir / f"nat1_step_{step:06d}.png")
-        print(f"[nat1] saved nat1_step_{step:06d}.png")
+        fp = (args.exp_name + "_") if args.exp_name else ""
+        TF.to_pil_image(grid[0]).save(outdir / f"{fp}nat1_step_{step:06d}.png")
+        print(f"[nat1] saved {fp}nat1_step_{step:06d}.png")
     except Exception as e:
         print(f"[warn] nat1 inference failed: {e}")
 
@@ -566,6 +581,9 @@ def main():
         image_size=512,   # model built at 512; handles smaller inputs fine
         use_source_pyramid=args.use_source_pyramid,
         use_decoder_attn=args.use_decoder_attn,
+        use_dit_bottleneck=args.use_dit_bottleneck,
+        num_dit_blocks=args.num_dit_blocks,
+        dit_mlp_ratio=args.dit_mlp_ratio,
     ).to(device)
 
     total = sum(p.numel() for p in model.parameters())
@@ -700,8 +718,9 @@ def main():
                            "throughput/it_per_s": 1.0 / sec_per_step,
                            "throughput/eta_sec": eta_sec}, step=step)
 
+        fp = (args.exp_name + "_") if args.exp_name else ""
         if step % args.checkpoint_every == 0:
-            ckpt_path = outdir / f"model_step_{step:06d}.pt"
+            ckpt_path = outdir / f"{fp}model_step_{step:06d}.pt"
             save_checkpoint(model, ema, flow_cfg, args, step, ckpt_path)
             print(f"[ckpt] saved {ckpt_path}")
 
@@ -711,7 +730,7 @@ def main():
 
             if val_lpips < best_lpips:
                 best_lpips = val_lpips
-                best_path = outdir / "model_best.pt"
+                best_path = outdir / f"{fp}model_best.pt"
                 save_checkpoint(model, ema, flow_cfg, args, step, best_path)
                 print(f"[best] new best lpips_sq={best_lpips:.4f}  saved {best_path}")
                 if wandb is not None:
@@ -721,7 +740,8 @@ def main():
             save_panel(ema.model, diffusion, val_loader_512, args, device, step, outdir)
 
     # Final save
-    final_path = outdir / "model.pt"
+    fp = (args.exp_name + "_") if args.exp_name else ""
+    final_path = outdir / f"{fp}model.pt"
     save_checkpoint(model, ema, flow_cfg, args, args.steps, final_path)
     print(f"[done] saved {final_path}  best_lpips_sq={best_lpips:.4f}")
     if wandb is not None:

@@ -476,6 +476,78 @@
 </svg>
 </div>
 
+<h2>DiT bottleneck (exp36 swap)</h2>
+
+<div class="svg-wrap">
+<svg viewBox="0 0 1200 320" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, monospace" font-size="11">
+  <defs>
+    <marker id="arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#666"/>
+    </marker>
+  </defs>
+
+  <text x="40" y="30" font-weight="700" font-size="13" fill="#1d1d1f">
+    Bottleneck swap when <tspan font-family="ui-monospace, monospace">--use-dit-bottleneck</tspan> is set
+  </text>
+  <text x="40" y="48" font-size="11" fill="#666">
+    Replaces (mid_attn + mid2) with N DiT blocks at constant width cm. mid1 still projects c4 → cm upstream.
+  </text>
+
+  <!-- Original (top row) -->
+  <text x="40" y="92" font-size="11" fill="#888">Original bottleneck (exp33 / exp34 / exp35):</text>
+
+  <rect x="40" y="100" width="100" height="40" rx="4" fill="#fff3cf" stroke="#b88a1d" stroke-width="1.4"/>
+  <text x="90" y="118" text-anchor="middle" font-weight="600">mid1</text>
+  <text x="90" y="132" text-anchor="middle" font-size="9" fill="#777">ResBlock c4→cm</text>
+  <line x1="140" y1="120" x2="160" y2="120" stroke="#666" marker-end="url(#arr3)"/>
+
+  <rect x="160" y="100" width="100" height="40" rx="4" fill="#e0d7f5" stroke="#5a4d99" stroke-width="1.5"/>
+  <text x="210" y="118" text-anchor="middle" font-weight="600" fill="#3d3373">mid_attn</text>
+  <text x="210" y="132" text-anchor="middle" font-size="9" fill="#5a4d99">always on</text>
+  <line x1="260" y1="120" x2="280" y2="120" stroke="#666" marker-end="url(#arr3)"/>
+
+  <rect x="280" y="100" width="100" height="40" rx="4" fill="#fde0eb" stroke="#9c3170" stroke-width="1.2" stroke-dasharray="4 3"/>
+  <text x="330" y="118" text-anchor="middle" font-weight="600" fill="#9c3170">tattn_mid?</text>
+  <text x="330" y="132" text-anchor="middle" font-size="9" fill="#777">temporal</text>
+  <line x1="380" y1="120" x2="400" y2="120" stroke="#666" marker-end="url(#arr3)"/>
+
+  <rect x="400" y="100" width="100" height="40" rx="4" fill="#fff3cf" stroke="#b88a1d" stroke-width="1.4"/>
+  <text x="450" y="118" text-anchor="middle" font-weight="600">mid2</text>
+  <text x="450" y="132" text-anchor="middle" font-size="9" fill="#777">ResBlock cm→cm</text>
+
+  <text x="540" y="124" font-size="11" fill="#666">≈ 8M params</text>
+
+  <!-- exp36 (bottom row) -->
+  <text x="40" y="184" font-size="11" fill="#a8391e" font-weight="600">exp36 bottleneck (--use-dit-bottleneck):</text>
+
+  <rect x="40" y="192" width="100" height="40" rx="4" fill="#fff3cf" stroke="#b88a1d" stroke-width="1.4"/>
+  <text x="90" y="210" text-anchor="middle" font-weight="600">mid1</text>
+  <text x="90" y="224" text-anchor="middle" font-size="9" fill="#777">unchanged</text>
+  <line x1="140" y1="212" x2="160" y2="212" stroke="#666" marker-end="url(#arr3)"/>
+
+  <rect x="160" y="180" width="380" height="64" rx="6" fill="#fff8f4" stroke="#d94e2a" stroke-width="1.6"/>
+  <text x="350" y="201" text-anchor="middle" font-weight="700" fill="#a8391e">DiTBottleneck (N=4 blocks)</text>
+  <text x="350" y="216" text-anchor="middle" font-size="10" fill="#444">2D sinusoidal PE → 4× [adaLN-zero → MHSA → adaLN-zero → MLP]</text>
+  <text x="350" y="232" text-anchor="middle" font-size="10" fill="#444">dim=cm=704 · num_heads=11 (head_dim=64) · mlp_ratio=4.0</text>
+
+  <line x1="540" y1="212" x2="560" y2="212" stroke="#666" marker-end="url(#arr3)"/>
+
+  <rect x="560" y="192" width="100" height="40" rx="4" fill="#fde0eb" stroke="#9c3170" stroke-width="1.2" stroke-dasharray="4 3"/>
+  <text x="610" y="210" text-anchor="middle" font-weight="600" fill="#9c3170">tattn_mid?</text>
+  <text x="610" y="224" text-anchor="middle" font-size="9" fill="#777">unchanged</text>
+
+  <text x="700" y="216" font-size="11" fill="#a8391e">≈ 28M params (+20M vs original)</text>
+
+  <!-- Note on identity-at-init -->
+  <text x="40" y="280" font-size="11" fill="#555">
+    <tspan font-weight="600">Identity at init</tspan>: adaLN-zero scheme zero-inits the (shift, scale, gate) projection per block, so each block's
+  </text>
+  <text x="40" y="296" font-size="11" fill="#555">
+    gated residual outputs zero, the residual is identity, and the whole DiT stack outputs its input unchanged at step 0.
+  </text>
+</svg>
+</div>
+
 <div class="notes">
 
 <h2>Notes</h2>
@@ -504,6 +576,11 @@
     resolution-matched features <code>f0..f3</code>; each <code>FiLM_dec*</code> module produces <code>(γ, β)</code> from the
     matching pyramid feature and modulates the decoder activation as <code>x · (1 + γ) + β</code>. Both γ and β
     zero-init.</li>
+  <li><strong>DiTBottleneck</strong> (exp36) — replaces (<code>mid_attn</code> + <code>mid2</code>) with a stack of N
+    DiT-XL-style transformer blocks operating on the flattened (H/16 × W/16, cm=704) token grid with 2D sinusoidal
+    positional embeddings. Each block does <code>adaLN-zero → MHSA → adaLN-zero → MLP</code> with t_emb modulating
+    the LayerNorm scale/shift and the residual gate. adaLN-zero init → identity at step 0. Adds ~28M params at the
+    default 4-block setting. See <a href="../src/img2img/dit.py">src/img2img/dit.py</a>.</li>
   <li><strong>t_emb fan-out</strong> (not drawn for clarity): every <code>ResBlock</code> (down*, mid*, dec*) takes the
     time-embedding via FiLM-style scale/shift on its residual.</li>
 </ul>
