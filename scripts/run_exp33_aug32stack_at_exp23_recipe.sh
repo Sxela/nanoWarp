@@ -12,13 +12,14 @@
 # LPIPS-VGG weight 0.2, bf16, lr 2e-4→1e-5 cosine, warmup 500) matches exp23.
 
 set -euo pipefail
-cd /home/researcher/workspace/nanoWarp
+# Run from the repo root regardless of where the script is invoked from.
+cd "$(dirname "$0")/.."
 
-export PYTHONPATH=.:/tmp/extpkgs2
-export TORCH_HOME=/tmp/torch_home
-export MPLCONFIGDIR=/tmp/mpl
-export WANDB_CACHE_DIR=/tmp/wandb_cache
-export WANDB_CONFIG_DIR=/tmp/wandb_config
+export PYTHONPATH="${PYTHONPATH:-.}"
+export TORCH_HOME="${TORCH_HOME:-/tmp/torch_home}"
+export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mpl}"
+export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-/tmp/wandb_cache}"
+export WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR:-/tmp/wandb_config}"
 # WANDB_API_KEY must be set in the launching shell (e.g. via ~/.netrc or
 # `export WANDB_API_KEY=...` before invoking this script). Never commit keys.
 : "${WANDB_API_KEY:?Set WANDB_API_KEY in your env before running this script.}"
