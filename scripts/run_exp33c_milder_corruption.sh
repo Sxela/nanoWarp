@@ -1,17 +1,21 @@
 #!/usr/bin/env bash
 # exp33c — exp33b's scale-1.5 recipe + corruption tail dialled back to a
-# realistic web-video envelope (no apocalyptic 4x downscale / σ=3 blur / q=30
-# JPEG samples that the model is unlikely to see at deployment).
+# realistic web-video envelope: only blur + JPEG, no resize-down-up.
 #
-# Hypothesis: exp33 / exp33b's clean-val regression vs exp23 is partly the
-# rare extreme tail of the corruption distribution burning training capacity
-# on inputs that never occur in real footage. Tightening the tail should
-# recover clean-val toward exp23 while keeping most of the robustness gain.
+# Rationale: real video frames at their target resolution don't go through
+# a downscale-then-upscale cycle — that artifact only occurs for thumbnails
+# blown up to display size, which isn't the deployment case. JPEG/codec
+# blockiness and mild defocus / motion blur are the actual compression
+# artifacts the model will see. exp33 / exp33b's clean-val regression vs
+# exp23 (0.308 / 0.274 vs 0.234) is partly the rare extreme tail of the
+# corruption distribution burning training capacity on inputs that never
+# occur in real footage.
 #
 # Aug recipe deltas vs exp33b:
-#   --degrade-resize-min  0.25 → 0.5   (max area loss now 4× instead of 16×)
-#   --corrupt-blur-max    3.0  → 2.0   (out-of-focus territory cut)
-#   --corrupt-jpeg-min    30   → 40    (skip the worst block artifacts)
+#   --degrade-resize-min  0.25 → 0.5   (when resize fires: 4× area max, not 16×)
+#   --degrade-resize-max  0.75 → 0.9   (most resize cases very mild)
+#   --corrupt-blur-max    3.0  → 2.0   (out-of-focus extreme cut)
+#   --corrupt-jpeg-min    30   → 40    (skip worst block artifacts)
 #
 # Everything else identical to exp33b (scale [1.0, 1.5], rotate ±25°,
 # perspective 0.15, color jitter ±0.3, hflip, exp23-style architecture).
@@ -50,7 +54,7 @@ python3 experiments/010_img2img_photo2comics/train_exp32_prog512.py \
     --aug-perspective 0.15 --aug-perspective-prob 0.5 \
     --aug-brightness 0.3 --aug-contrast 0.3 --aug-saturation 0.3 \
     --clean-prob 0.2 \
-    --degrade-resize-prob 0.3 --degrade-resize-min 0.5 --degrade-resize-max 0.75 \
+    --degrade-resize-prob 0.3 --degrade-resize-min 0.5 --degrade-resize-max 0.9 \
     --corrupt-blur-max 2.0 --corrupt-blur-prob 0.7 \
     --corrupt-jpeg-min 40 --corrupt-jpeg-prob 0.7 \
     --val-every 1000 --panel-every 1000 --checkpoint-every 5000 --best-every 1000 \

@@ -2347,7 +2347,8 @@ tail should recover clean-val toward exp23 while keeping most of the
 robustness gain (smaller corruption-val Δ than exp25's +0.116).
 
 **Aug recipe deltas vs exp33b**:
-- `--degrade-resize-min 0.25 → 0.5` (max area loss now 4× instead of 16×)
+- `--degrade-resize-min 0.25 → 0.5` (when fired: 4× area max instead of 16×)
+- `--degrade-resize-max 0.75 → 0.9` (most resize cases very mild)
 - `--corrupt-blur-max 3.0 → 2.0` (cuts out-of-focus extreme)
 - `--corrupt-jpeg-min 30 → 40` (skips the worst block artifacts)
 
