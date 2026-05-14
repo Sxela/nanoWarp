@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.hub import load_state_dict_from_url
 
 from .colorspace import linear_to_srgb
+from .source_pyramid import FiLM, SourcePyramid
 from .temporal import TemporalAttn
 
 
@@ -268,6 +269,7 @@ class Img2ImgDiffusionUNet(nn.Module):
         color_space: str = "srgb",
         use_temporal: bool = False,
         mask_channels: int = 0,
+        use_source_pyramid: bool = False,
     ):
         super().__init__()
         if upsample_type not in ("resize_conv", "pixel_shuffle"):
@@ -284,6 +286,7 @@ class Img2ImgDiffusionUNet(nn.Module):
         self.color_space = color_space
         self.use_temporal = use_temporal
         self.mask_channels = mask_channels
+        self.use_source_pyramid = use_source_pyramid
         self._temporal_num_frames: int = 1  # set via set_temporal_frames()
         if use_source_encoder:
             self.source_encoder = SourceEncoder(
@@ -395,6 +398,28 @@ class Img2ImgDiffusionUNet(nn.Module):
         self.out_norm = nn.GroupNorm(8, c1)
         self.out_conv = nn.Conv2d(c1, out_ch, 3, padding=1)
 
+        # Optional in-model source feature pyramid + FiLM modulation of the
+        # decoder. Zero-init FiLM → identity at init; old (no-pyramid)
+        # checkpoints load cleanly into a pyramid-enabled model via
+        # strict=False (the pyramid + FiLM weights are then missing keys
+        # initialised here, which is the desired warm-start behaviour).
+        # Decoder block output channels after each dec*: dec4→c3 @ H/8,
+        # dec3→c3 @ H/4, dec2→c2 @ H/2, dec1→c1 @ H. Pyramid stages emit
+        # (c1, c2, c3, c4) at (H, H/2, H/4, H/8), so the channel widths line
+        # up with the matching-resolution decoder activations.
+        if use_source_pyramid:
+            self.source_pyramid = SourcePyramid(channels=(c1, c2, c3, c4))
+            self.film_dec4 = FiLM(cond_ch=c4, target_ch=c3)   # H/8
+            self.film_dec3 = FiLM(cond_ch=c3, target_ch=c3)   # H/4
+            self.film_dec2 = FiLM(cond_ch=c2, target_ch=c2)   # H/2
+            self.film_dec1 = FiLM(cond_ch=c1, target_ch=c1)   # H
+        else:
+            self.source_pyramid = None
+            self.film_dec4 = None
+            self.film_dec3 = None
+            self.film_dec2 = None
+            self.film_dec1 = None
+
     # ------------------------------------------------------------------
     # Temporal state helpers
     # ------------------------------------------------------------------
@@ -445,6 +470,13 @@ class Img2ImgDiffusionUNet(nn.Module):
         def _ta(feat, mod):
             return mod(feat) if mod is not None else feat
 
+        # Source pyramid features (one set per source, independent of t).
+        # pyr_feats = [f_H, f_H/2, f_H/4, f_H/8] with channels (c1, c2, c3, c4).
+        pyr_feats = self.source_pyramid(source) if self.source_pyramid is not None else None
+
+        def _film(feat, mod, idx):
+            return mod(feat, pyr_feats[idx]) if (mod is not None and pyr_feats is not None) else feat
+
         if self.use_source_encoder:
             encoder_input = linear_to_srgb(source).clamp(0, 1) if self.color_space == "linear_rgb" else source
             src_feats = self.source_encoder(encoder_input)
@@ -482,15 +514,19 @@ class Img2ImgDiffusionUNet(nn.Module):
 
         x = self.up4(mid)
         x = self.dec4(torch.cat([x, h4], dim=1), t_emb)
+        x = _film(x, self.film_dec4, 3)   # H/8 source feat
         x = _ta(x, self.tattn_dec4)
         x = self.up3(x)
         x = self.dec3(torch.cat([x, h3], dim=1), t_emb)
+        x = _film(x, self.film_dec3, 2)   # H/4 source feat
         x = _ta(x, self.tattn_dec3)
         x = self.up2(x)
         x = self.dec2(torch.cat([x, h2], dim=1), t_emb)
+        x = _film(x, self.film_dec2, 1)   # H/2 source feat
         x = _ta(x, self.tattn_dec2)
         x = self.up1(x)
         x = self.dec1(torch.cat([x, h1], dim=1), t_emb)
+        x = _film(x, self.film_dec1, 0)   # H source feat
         x = _ta(x, self.tattn_dec1)
 
         return self.out_conv(F.silu(self.out_norm(x)))

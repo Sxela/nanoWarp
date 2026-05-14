@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Img2ImgDiffusionUNet — architecture diagram</title>
+<style>
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #fafafa;
+    color: #1d1d1f;
+    margin: 0;
+    padding: 24px;
+  }
+  h1 { margin: 0 0 4px 0; font-size: 20px; }
+  .subtitle { color: #555; font-size: 13px; margin-bottom: 16px; }
+  .svg-wrap {
+    background: white;
+    border: 1px solid #e5e5e5;
+    border-radius: 8px;
+    padding: 12px;
+    overflow-x: auto;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+  }
+  svg { display: block; max-width: 100%; height: auto; }
+  .notes {
+    margin-top: 16px;
+    font-size: 13px;
+    line-height: 1.55;
+    color: #333;
+    max-width: 1300px;
+  }
+  .notes code {
+    background: #f0f0f0;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 12px;
+  }
+  .notes ul { padding-left: 22px; }
+  .legend-row { display: flex; gap: 24px; flex-wrap: wrap; font-size: 12px; align-items: center; margin-top: 8px; }
+  .legend-row span.swatch {
+    display: inline-block; width: 28px; height: 14px; border-radius: 3px; margin-right: 6px; vertical-align: middle;
+  }
+</style>
+</head>
+<body>
+
+<h1>Img2ImgDiffusionUNet — architecture</h1>
+<div class="subtitle">
+  Source: <code>src/img2img/model.py</code> · widths shown at <code>model_ch=88</code> (exp25+ default)
+</div>
+
+<div class="svg-wrap">
+<svg viewBox="0 0 1500 760" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- arrow heads -->
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#666"/>
+    </marker>
+    <marker id="arr-skip" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#9aa3b2"/>
+    </marker>
+    <marker id="arr-film" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#d94e2a"/>
+    </marker>
+  </defs>
+
+  <!-- =================== INPUTS =================== -->
+  <g font-family="ui-monospace, monospace" font-size="11">
+
+    <!-- Source / NoisyTarget -->
+    <rect x="80"  y="20" width="140" height="40" rx="6" fill="#fef6e4" stroke="#c89b3c" stroke-width="1.4"/>
+    <text x="150" y="38" text-anchor="middle" font-weight="600" fill="#1d1d1f">source</text>
+    <text x="150" y="52" text-anchor="middle" fill="#666">(B, 3, H, W)</text>
+
+    <rect x="240" y="20" width="140" height="40" rx="6" fill="#fef6e4" stroke="#c89b3c" stroke-width="1.4"/>
+    <text x="310" y="38" text-anchor="middle" font-weight="600" fill="#1d1d1f">noisy_target</text>
+    <text x="310" y="52" text-anchor="middle" fill="#666">(B, 3, H, W)</text>
+
+    <!-- frame_mask (optional) -->
+    <rect x="400" y="20" width="140" height="40" rx="6" fill="#fff" stroke="#9aa3b2" stroke-width="1.2" stroke-dasharray="4 3"/>
+    <text x="470" y="38" text-anchor="middle" font-weight="600" fill="#1d1d1f">frame_mask?</text>
+    <text x="470" y="52" text-anchor="middle" fill="#666">(B, 1, H, W) · WAN anchor</text>
+
+    <!-- t -->
+    <rect x="560" y="20" width="100" height="40" rx="6" fill="#fef6e4" stroke="#c89b3c" stroke-width="1.4"/>
+    <text x="610" y="38" text-anchor="middle" font-weight="600" fill="#1d1d1f">t</text>
+    <text x="610" y="52" text-anchor="middle" fill="#666">(B,) → MLP</text>
+
+    <!-- in_conv -->
+    <line x1="150" y1="60"  x2="150" y2="92"  stroke="#666" marker-end="url(#arr)"/>
+    <line x1="310" y1="60"  x2="310" y2="92"  stroke="#666" marker-end="url(#arr)"/>
+    <line x1="470" y1="60"  x2="470" y2="92"  stroke="#9aa3b2" stroke-dasharray="3 3" marker-end="url(#arr-skip)"/>
+    <text x="220" y="80" text-anchor="middle" font-size="10" fill="#666">concat (channel)</text>
+
+    <rect x="120" y="92" width="280" height="44" rx="6" fill="#dbe9ff" stroke="#3a6fbc" stroke-width="1.4"/>
+    <text x="260" y="112" text-anchor="middle" font-weight="600">in_conv  Conv3x3</text>
+    <text x="260" y="126" text-anchor="middle" fill="#444">(6, H, W) → (c1=88, H, W)</text>
+
+    <!-- mask_proj optional add into x0 -->
+    <rect x="430" y="92" width="160" height="44" rx="6" fill="#fff" stroke="#9aa3b2" stroke-width="1.2" stroke-dasharray="4 3"/>
+    <text x="510" y="112" text-anchor="middle" font-weight="600" fill="#444">mask_proj  1x1</text>
+    <text x="510" y="126" text-anchor="middle" fill="#666">zero-init · adds to x0</text>
+    <line x1="430" y1="114" x2="400" y2="114" stroke="#9aa3b2" stroke-dasharray="3 3" marker-end="url(#arr-skip)"/>
+
+    <!-- ====================== ENCODER ====================== -->
+
+    <!-- down1 / h1 -->
+    <line x1="260" y1="136" x2="260" y2="170" stroke="#666" marker-end="url(#arr)"/>
+    <rect x="120" y="170" width="280" height="60" rx="6" fill="#dbe9ff" stroke="#3a6fbc" stroke-width="1.4"/>
+    <text x="260" y="190" text-anchor="middle" font-weight="600">down1 = ResBlock + [attn1?] + [tattn1?]</text>
+    <text x="260" y="206" text-anchor="middle" fill="#444">(c1=88, H, W) → h1</text>
+    <text x="260" y="220" text-anchor="middle" font-size="10" fill="#888">attn1 if H ∈ attn_res · tattn1 if use_temporal</text>
+
+    <!-- ds1 + down2 -->
+    <line x1="260" y1="230" x2="260" y2="260" stroke="#666" marker-end="url(#arr)"/>
+    <text x="278" y="248" font-size="10" fill="#666">↓2</text>
+    <rect x="120" y="260" width="280" height="60" rx="6" fill="#dbe9ff" stroke="#3a6fbc" stroke-width="1.4"/>
+    <text x="260" y="280" text-anchor="middle" font-weight="600">down2 = ResBlock + [attn2?] + [tattn2?]</text>
+    <text x="260" y="296" text-anchor="middle" fill="#444">→ (c2=176, H/2, W/2) = h2</text>
+
+    <!-- ds2 + down3 -->
+    <line x1="260" y1="320" x2="260" y2="350" stroke="#666" marker-end="url(#arr)"/>
+    <text x="278" y="338" font-size="10" fill="#666">↓2</text>
+    <rect x="120" y="350" width="280" height="60" rx="6" fill="#dbe9ff" stroke="#3a6fbc" stroke-width="1.4"/>
+    <text x="260" y="370" text-anchor="middle" font-weight="600">down3 = ResBlock + [attn3?] + [tattn3?]</text>
+    <text x="260" y="386" text-anchor="middle" fill="#444">→ (c3=352, H/4, W/4) = h3</text>
+
+    <!-- ds3 + down4 -->
+    <line x1="260" y1="410" x2="260" y2="440" stroke="#666" marker-end="url(#arr)"/>
+    <text x="278" y="428" font-size="10" fill="#666">↓2</text>
+    <rect x="120" y="440" width="280" height="60" rx="6" fill="#dbe9ff" stroke="#3a6fbc" stroke-width="1.4"/>
+    <text x="260" y="460" text-anchor="middle" font-weight="600">down4 = ResBlock + [attn4?] + [tattn4?]</text>
+    <text x="260" y="476" text-anchor="middle" fill="#444">→ (c4=352, H/8, W/8) = h4</text>
+
+    <!-- ds4 + bottleneck -->
+    <line x1="260" y1="500" x2="260" y2="530" stroke="#666" marker-end="url(#arr)"/>
+    <text x="278" y="518" font-size="10" fill="#666">↓2</text>
+    <rect x="100" y="530" width="600" height="100" rx="6" fill="#fff3cf" stroke="#b88a1d" stroke-width="1.4"/>
+    <text x="400" y="552" text-anchor="middle" font-weight="600">Bottleneck (H/16, cm=704)</text>
+    <text x="400" y="572" text-anchor="middle" fill="#333">mid1: ResBlock(c4 → cm) → mid_attn (always on, BottleneckAttention)</text>
+    <text x="400" y="588" text-anchor="middle" fill="#333">→ [tattn_mid?] → mid2: ResBlock(cm → cm)</text>
+    <text x="400" y="608" text-anchor="middle" font-size="10" fill="#888">tattn_mid if use_temporal</text>
+
+    <!-- ====================== DECODER (right column) ====================== -->
+
+    <!-- bottleneck → up4 (curved-ish, just diagonal up-right) -->
+    <line x1="700" y1="556" x2="780" y2="500" stroke="#666" marker-end="url(#arr)"/>
+
+    <!-- up4 + dec4 -->
+    <rect x="620" y="440" width="320" height="60" rx="6" fill="#dcf3df" stroke="#3f8a4f" stroke-width="1.4"/>
+    <text x="780" y="460" text-anchor="middle" font-weight="600">up4 ‖ concat(h4) ‖ dec4 = ResBlock(cm+c4→c3)</text>
+    <text x="780" y="476" text-anchor="middle" fill="#444">+ [FiLM_dec4?] + [tattn_dec4?]  · (c3=352, H/8)</text>
+
+    <!-- up3 + dec3 -->
+    <line x1="780" y1="440" x2="780" y2="410" stroke="#666" marker-end="url(#arr)"/>
+    <text x="800" y="426" font-size="10" fill="#666">↑2</text>
+    <rect x="620" y="350" width="320" height="60" rx="6" fill="#dcf3df" stroke="#3f8a4f" stroke-width="1.4"/>
+    <text x="780" y="370" text-anchor="middle" font-weight="600">up3 ‖ concat(h3) ‖ dec3 = ResBlock(c3+c3→c3)</text>
+    <text x="780" y="386" text-anchor="middle" fill="#444">+ [FiLM_dec3?] + [tattn_dec3?]  · (c3=352, H/4)</text>
+
+    <!-- up2 + dec2 -->
+    <line x1="780" y1="350" x2="780" y2="320" stroke="#666" marker-end="url(#arr)"/>
+    <text x="800" y="336" font-size="10" fill="#666">↑2</text>
+    <rect x="620" y="260" width="320" height="60" rx="6" fill="#dcf3df" stroke="#3f8a4f" stroke-width="1.4"/>
+    <text x="780" y="280" text-anchor="middle" font-weight="600">up2 ‖ concat(h2) ‖ dec2 = ResBlock(c3+c2→c2)</text>
+    <text x="780" y="296" text-anchor="middle" fill="#444">+ [FiLM_dec2?] + [tattn_dec2?]  · (c2=176, H/2)</text>
+
+    <!-- up1 + dec1 -->
+    <line x1="780" y1="260" x2="780" y2="230" stroke="#666" marker-end="url(#arr)"/>
+    <text x="800" y="246" font-size="10" fill="#666">↑2</text>
+    <rect x="620" y="170" width="320" height="60" rx="6" fill="#dcf3df" stroke="#3f8a4f" stroke-width="1.4"/>
+    <text x="780" y="190" text-anchor="middle" font-weight="600">up1 ‖ concat(h1) ‖ dec1 = ResBlock(c2+c1→c1)</text>
+    <text x="780" y="206" text-anchor="middle" fill="#444">+ [FiLM_dec1?] + [tattn_dec1?]  · (c1=88, H)</text>
+
+    <!-- out_norm / out_conv -->
+    <line x1="780" y1="170" x2="780" y2="140" stroke="#666" marker-end="url(#arr)"/>
+    <rect x="640" y="92" width="280" height="44" rx="6" fill="#dcf3df" stroke="#3f8a4f" stroke-width="1.4"/>
+    <text x="780" y="112" text-anchor="middle" font-weight="600">out_norm → SiLU → out_conv</text>
+    <text x="780" y="126" text-anchor="middle" fill="#444">(c1, H, W) → (3, H, W) = velocity v̂</text>
+
+    <line x1="780" y1="92" x2="780" y2="60" stroke="#666" marker-end="url(#arr)"/>
+    <rect x="700" y="20" width="160" height="40" rx="6" fill="#fef6e4" stroke="#c89b3c" stroke-width="1.4"/>
+    <text x="780" y="38" text-anchor="middle" font-weight="600">output v̂</text>
+    <text x="780" y="52" text-anchor="middle" fill="#666">(B, 3, H, W)</text>
+
+    <!-- ====================== SKIP ARROWS ====================== -->
+    <!-- h1 → dec1 -->
+    <path d="M 400 200 L 620 200" fill="none" stroke="#9aa3b2" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr-skip)"/>
+    <text x="510" y="194" text-anchor="middle" font-size="10" fill="#7a8395">skip h1</text>
+
+    <!-- h2 → dec2 -->
+    <path d="M 400 290 L 620 290" fill="none" stroke="#9aa3b2" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr-skip)"/>
+    <text x="510" y="284" text-anchor="middle" font-size="10" fill="#7a8395">skip h2</text>
+
+    <!-- h3 → dec3 -->
+    <path d="M 400 380 L 620 380" fill="none" stroke="#9aa3b2" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr-skip)"/>
+    <text x="510" y="374" text-anchor="middle" font-size="10" fill="#7a8395">skip h3</text>
+
+    <!-- h4 → dec4 -->
+    <path d="M 400 470 L 620 470" fill="none" stroke="#9aa3b2" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr-skip)"/>
+    <text x="510" y="464" text-anchor="middle" font-size="10" fill="#7a8395">skip h4</text>
+
+    <!-- ====================== SOURCE PYRAMID (right column) ====================== -->
+
+    <!-- Source → pyramid -->
+    <path d="M 220 40 Q 600 -20 1050 92" fill="none" stroke="#d94e2a" stroke-width="1.4" marker-end="url(#arr-film)"/>
+    <text x="1000" y="55" text-anchor="middle" font-size="10" fill="#d94e2a">source (if use_source_pyramid)</text>
+
+    <rect x="1000" y="92" width="280" height="48" rx="6" fill="#fde4d4" stroke="#d94e2a" stroke-width="1.5"/>
+    <text x="1140" y="112" text-anchor="middle" font-weight="600">SourcePyramid (~1.8M params)</text>
+    <text x="1140" y="128" text-anchor="middle" fill="#444">conv stem + 3 down stages</text>
+
+    <line x1="1140" y1="140" x2="1140" y2="170" stroke="#d94e2a" stroke-width="1.4" marker-end="url(#arr-film)"/>
+    <rect x="1000" y="170" width="280" height="60" rx="6" fill="#fde4d4" stroke="#d94e2a" stroke-width="1.4"/>
+    <text x="1140" y="190" text-anchor="middle" font-weight="600">f0  (stem out)</text>
+    <text x="1140" y="206" text-anchor="middle" fill="#444">(c1=88, H, W)</text>
+
+    <line x1="1140" y1="230" x2="1140" y2="260" stroke="#d94e2a" stroke-width="1.4" marker-end="url(#arr-film)"/>
+    <rect x="1000" y="260" width="280" height="60" rx="6" fill="#fde4d4" stroke="#d94e2a" stroke-width="1.4"/>
+    <text x="1140" y="280" text-anchor="middle" font-weight="600">f1  (stage1)</text>
+    <text x="1140" y="296" text-anchor="middle" fill="#444">(c2=176, H/2, W/2)</text>
+
+    <line x1="1140" y1="320" x2="1140" y2="350" stroke="#d94e2a" stroke-width="1.4" marker-end="url(#arr-film)"/>
+    <rect x="1000" y="350" width="280" height="60" rx="6" fill="#fde4d4" stroke="#d94e2a" stroke-width="1.4"/>
+    <text x="1140" y="370" text-anchor="middle" font-weight="600">f2  (stage2)</text>
+    <text x="1140" y="386" text-anchor="middle" fill="#444">(c3=352, H/4, W/4)</text>
+
+    <line x1="1140" y1="410" x2="1140" y2="440" stroke="#d94e2a" stroke-width="1.4" marker-end="url(#arr-film)"/>
+    <rect x="1000" y="440" width="280" height="60" rx="6" fill="#fde4d4" stroke="#d94e2a" stroke-width="1.4"/>
+    <text x="1140" y="460" text-anchor="middle" font-weight="600">f3  (stage3)</text>
+    <text x="1140" y="476" text-anchor="middle" fill="#444">(c4=352, H/8, W/8)</text>
+
+    <!-- FiLM arrows pyramid → decoder -->
+    <path d="M 1000 200 L 940 200" fill="none" stroke="#d94e2a" stroke-width="1.5" marker-end="url(#arr-film)"/>
+    <text x="975" y="194" text-anchor="middle" font-size="10" fill="#d94e2a">FiLM_dec1</text>
+
+    <path d="M 1000 290 L 940 290" fill="none" stroke="#d94e2a" stroke-width="1.5" marker-end="url(#arr-film)"/>
+    <text x="975" y="284" text-anchor="middle" font-size="10" fill="#d94e2a">FiLM_dec2</text>
+
+    <path d="M 1000 380 L 940 380" fill="none" stroke="#d94e2a" stroke-width="1.5" marker-end="url(#arr-film)"/>
+    <text x="975" y="374" text-anchor="middle" font-size="10" fill="#d94e2a">FiLM_dec3</text>
+
+    <path d="M 1000 470 L 940 470" fill="none" stroke="#d94e2a" stroke-width="1.5" marker-end="url(#arr-film)"/>
+    <text x="975" y="464" text-anchor="middle" font-size="10" fill="#d94e2a">FiLM_dec4</text>
+
+    <!-- t embedding sidelines (conceptual, into every ResBlock) -->
+    <text x="610" y="80" font-size="10" fill="#888">t_emb (time-MLP) injected into every ResBlock</text>
+
+    <!-- ====================== LEGEND ====================== -->
+    <g transform="translate(80, 670)">
+      <rect x="0" y="0" width="1340" height="80" rx="6" fill="#fafafa" stroke="#e0e0e0"/>
+      <text x="14" y="22" font-weight="600" font-size="13">Legend</text>
+
+      <rect x="14"  y="36" width="22" height="14" rx="3" fill="#dbe9ff" stroke="#3a6fbc"/>
+      <text x="44"  y="48" font-size="11" fill="#333">Encoder block (always present)</text>
+
+      <rect x="240" y="36" width="22" height="14" rx="3" fill="#fff3cf" stroke="#b88a1d"/>
+      <text x="270" y="48" font-size="11" fill="#333">Bottleneck (always present)</text>
+
+      <rect x="430" y="36" width="22" height="14" rx="3" fill="#dcf3df" stroke="#3f8a4f"/>
+      <text x="460" y="48" font-size="11" fill="#333">Decoder block (always present)</text>
+
+      <rect x="630" y="36" width="22" height="14" rx="3" fill="#fef6e4" stroke="#c89b3c"/>
+      <text x="660" y="48" font-size="11" fill="#333">Input / output tensor</text>
+
+      <rect x="820" y="36" width="22" height="14" rx="3" fill="#fde4d4" stroke="#d94e2a"/>
+      <text x="850" y="48" font-size="11" fill="#333">Source pyramid + FiLM (exp34, optional)</text>
+
+      <rect x="1080" y="36" width="22" height="14" rx="3" fill="#fff" stroke="#9aa3b2" stroke-dasharray="4 3"/>
+      <text x="1110" y="48" font-size="11" fill="#333">Optional module (flag-gated)</text>
+
+      <line x1="14"  y1="66" x2="44"  y2="66" stroke="#9aa3b2" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr-skip)"/>
+      <text x="56"  y="70" font-size="11" fill="#333">Skip connection (encoder → decoder)</text>
+
+      <line x1="290" y1="66" x2="320" y2="66" stroke="#d94e2a" stroke-width="1.5" marker-end="url(#arr-film)"/>
+      <text x="332" y="70" font-size="11" fill="#333">FiLM modulation arrow (pyramid → decoder)</text>
+
+      <line x1="580" y1="66" x2="610" y2="66" stroke="#666" stroke-width="1.5" marker-end="url(#arr)"/>
+      <text x="622" y="70" font-size="11" fill="#333">Main forward edge</text>
+    </g>
+  </g>
+</svg>
+</div>
+
+<div class="notes">
+  <p><strong>Conventions.</strong> Blocks marked <code>[name?]</code> are optional and gated by constructor flags or
+  resolution checks; the constructor leaves them as <code>None</code> when off, which keeps the state_dict clean and
+  permits old checkpoints to load via <code>strict=False</code>.</p>
+
+  <ul>
+    <li><strong>Attention at each level</strong> (<code>attn1..attn4</code>) — created only if the level's resolution
+      is in <code>attn_resolutions</code> (e.g. <code>(16, 32, 64)</code> for exp25/exp33). <code>mid_attn</code> at the
+      bottleneck is always present.</li>
+    <li><strong>Temporal attention</strong> (<code>tattn*</code>) — created only when
+      <code>use_temporal=True</code>. Inserted after each spatial block at encoder, bottleneck, and decoder;
+      256px/128px levels are skipped (B×H·W too large for CUDA attention kernels at common batch sizes).
+      Defined in <code>src/img2img/temporal.py</code>.</li>
+    <li><strong>mask_proj</strong> — created only when <code>mask_channels > 0</code> (WAN-style anchor conditioning).
+      Adds a zero-init projection of <code>frame_mask</code> into the stem output <code>x0</code>; identity at init.</li>
+    <li><strong>SourceEncoder + FuseBlock</strong> (not drawn; mutually exclusive with source-in-stem) — gated by
+      <code>use_source_encoder</code>. When on, the source is encoded by an ImageNet-pretrained ResNet18 and
+      injected additively at each encoder level via <code>fuse1..fuse4</code> + <code>mid_fuse</code>. exp25 onward
+      uses <code>--no-source-encoder</code> (source-in-stem); the diagram reflects that default.</li>
+    <li><strong>SourcePyramid + FiLM</strong> (exp34, drawn in orange) — created only when
+      <code>use_source_pyramid=True</code>. The pyramid encodes the raw source once per forward into four
+      resolution-matched features <code>f0..f3</code>; each <code>FiLM_dec*</code> module produces
+      <code>(γ, β)</code> from the matching pyramid feature and modulates the decoder activation as
+      <code>x * (1 + γ) + β</code>. Both γ and β are zero-init, so a pyramid-enabled model at step 0 emits the same
+      output as a no-pyramid model with identical backbone weights — making the swap safe to introduce in any
+      existing training recipe.</li>
+  </ul>
+
+  <p><strong>What the diagram does not show</strong>: time-embedding injection (<code>time_mlp</code> feeds every
+  <code>ResBlock</code> via FiLM-style scale/shift on the residual), the optional <code>color_space</code> conversion
+  from linear RGB to sRGB before the source encoder, or per-frame batching in the temporal-attention path
+  (<code>BT = B × T</code> when <code>use_temporal=True</code>).</p>
+
+  <p class="legend-row">
+    <strong>Files referenced:</strong>
+    <code><a href="../src/img2img/model.py">src/img2img/model.py</a></code> ·
+    <code><a href="../src/img2img/source_pyramid.py">src/img2img/source_pyramid.py</a></code> ·
+    <code><a href="../src/img2img/temporal.py">src/img2img/temporal.py</a></code>
+  </p>
+</div>
+
+</body>
+</html>

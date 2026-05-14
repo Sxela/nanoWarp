@@ -2199,6 +2199,103 @@ Results: TBD (run in progress, 100k steps)
 
 ---
 
+## exp33 — exp23 recipe (20k @ 256px bs=4) with the full exp32 aug stack
+
+**Status: RUNNING 2026-05-14**
+
+Clean A/B vs exp23 (lpips_sq=0.127) to isolate the aug stack's impact at
+fixed compute. Single architectural delta vs exp23: none — only the
+augmentation pipeline changes. exp32 confounds aug × progressive-res × 100k
+steps; exp33 strips out the first two confounds.
+
+**Aug stack** (vs exp23's `scale=1.10` + hflip):
+- Shared geometry: zoom scale U[1.0, 2.5], rotate ±25°, perspective 0.15
+  @ p=0.5, hflip p=0.5.
+- Source-only color jitter: brightness/contrast/saturation ±0.3.
+- Source-only degradation (clean_prob=0.2): resize-down+up p=0.3
+  (factor U[0.25, 0.75]), Gaussian blur σ U[0.5, 3.0] p=0.7,
+  JPEG quality U[30, 95] p=0.7.
+
+**Recipe** (everything else matches exp23): mc=88, attn 16/32/64, no source
+encoder (source-in-stem), flow FM, LPIPS-VGG weight 0.2, bf16,
+lr 2e-4 → 1e-5 cosine, warmup 500, 20k steps.
+
+```bash
+WANDB_API_KEY=... bash scripts/run_exp33_aug32stack_at_exp23_recipe.sh
+```
+
+Script: `scripts/run_exp33_aug32stack_at_exp23_recipe.sh`
+Outdir: `out/exp33_aug32stack_noenc_attn163264_bf16_mc88_256px_20k`
+
+Running on Colab (~20 min wall-clock for 20k steps at 256px bs=4 on the
+provisioned GPU — single iteration loop is fast enough that from-scratch is
+the default for the follow-up experiments).
+
+Results: TBD.
+
+**Aug-scale risk**: exp24 crashed at `scale=4.0` (1/16 image area per crop →
+hard-region recovery dip at step ~4k). exp33 uses U[1.0, 2.5] which is in
+the regime that exp24 fell over in; watch the val curve at 4-6k steps for a
+similar pattern. If present, follow-up with `--aug-scale-max 1.5`.
+
+---
+
+## exp34 — exp33 recipe + in-model source feature pyramid + FiLM
+
+**Status: WIRED 2026-05-14** (ready to launch after exp33 settles)
+
+Clean A/B vs exp33 (same data, same aug, same compute budget) to isolate
+the contribution of a permanent in-model source feature pyramid. Single
+architectural delta vs exp33: adds `SourcePyramid` + per-decoder-level
+`FiLM` modulation.
+
+**Architecture**:
+- `SourcePyramid` ([src/img2img/source_pyramid.py](../src/img2img/source_pyramid.py)):
+  4-stage conv pyramid (`stem → s1 → s2 → s3`) run **once per source per
+  forward pass**, producing features at the four decoder resolutions
+  (H, H/2, H/4, H/8) with channels matching UNet widths
+  (c1=88, c2=176, c3=352, c4=352). ~1.8M params at mc=88.
+- `FiLM` (same file): per-decoder-level 1×1 conv produces (γ, β) from a
+  pyramid feature; decoder activation becomes `x * (1 + γ) + β`. Both γ and
+  β zero-init → identity at init. ~573k params total across the 4 levels.
+- Net: ~2.4M extra params over exp33 (total ~51M, up from ~49M).
+
+**Why FiLM not cross-attention** (first try): half the params, no head-dim
+hyperparams, identity-at-init for free. If FiLM shows even modest gain we
+can iterate to cross-attn later.
+
+**Why no inference-time external deps**: pyramid is part of the UNet and
+ships in the same checkpoint as everything else. The pyramid is the
+permanent in-model alternative to the optional ResNet18 source encoder.
+
+**Recipe**: identical to exp33 except `--use-source-pyramid` is passed.
+
+```bash
+WANDB_API_KEY=... bash scripts/run_exp34_pyramid_at_exp33_recipe.sh
+```
+
+Script: `scripts/run_exp34_pyramid_at_exp33_recipe.sh`
+Outdir: `out/exp34_pyramid_film_noenc_attn163264_bf16_mc88_256px_20k`
+
+**Compute redundancy**: pyramid output is independent of t, so it
+recomputes wastefully across the 20 ODE steps at inference. Pyramid is
+~1.8M cheap conv params → <1ms per call on a 4090 → ~600ms wasted per
+30-frame video clip. Acceptable for now; can cache later if profiling
+demands it.
+
+Results: TBD.
+
+**Architecture diagram**: [docs/model_architecture.html](model_architecture.html)
+(self-contained HTML/SVG; shows the full UNet, optional modules, and the
+exp34 source pyramid + FiLM hooks).
+
+Next experiments (queued, contingent on exp34 result):
+- **exp35** — U-DiT bottleneck: replace `mid_attn` / `mid1` / `mid2` with
+  4–6 transformer blocks at the 16×16 level. Same param budget, different
+  long-range mixing.
+
+---
+
 ## Temporal / video experiments
 
 All temporal experiments (exp27 onwards) are documented in

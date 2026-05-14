@@ -342,6 +342,9 @@ def parse_args():
     p.add_argument("--steps", type=int, default=100_000)
     p.add_argument("--model-ch", type=int, default=88)
     p.add_argument("--attn-resolutions", default="16,32,64")
+    p.add_argument("--use-source-pyramid", action="store_true",
+                   help="Enable in-model SourcePyramid + FiLM modulation of the decoder. "
+                        "~2.4M extra params at mc=88. Zero-init FiLM → identity at init.")
     # phase schedule overrides (end steps)
     p.add_argument("--phase1-end", type=int, default=5_000,   help="Last step of 128px phase")
     p.add_argument("--phase2-end", type=int, default=25_000,  help="Last step of 256px phase")
@@ -557,6 +560,7 @@ def main():
         upsample_type="resize_conv",
         attn_resolutions=attn_res,
         image_size=512,   # model built at 512; handles smaller inputs fine
+        use_source_pyramid=args.use_source_pyramid,
     ).to(device)
 
     total = sum(p.numel() for p in model.parameters())
