@@ -339,6 +339,36 @@ else:
 If any LoRA keys appear in that list (they shouldn't on fresh start), something
 is wrong. At inference, inverted/negative outputs are the visual tell.
 
+### Deterministic-per-index augmentation in temporal datasets
+
+**Problem (affected exp27–exp30)**: `TemporalPairedDataset.__getitem__` in both
+`src/img2img/temporal_dataset.py` and `temporal_dataset_v2.py` seeded a fresh
+`random.Random(idx)` for every sample. Comment claimed "deterministic per-index
+for reproducibility" — actual effect was that every epoch produced the **exact
+same** pan trajectory, zoom, flip decision, and (in v2) anchor-on-frame-0
+decision for each image. For the 1k-pair dataset this meant the model only ever
+saw 1000 unique clips, no matter how many steps trained.
+
+Likely contributor to the temporal val plateau around step 7k (exp29b table) —
+model was effectively iterating a frozen synthetic set rather than continuously
+regenerated trajectories.
+
+**Fix** (2026-05-14): added `deterministic: bool = False` to `TemporalAugConfig`.
+`__getitem__` uses module-level `random` (worker-seeded → varies per epoch)
+by default, and `Random(idx)` only when `deterministic=True`. Train scripts
+leave the default; val configs set `deterministic=True` so val curves stay
+comparable. PyTorch's DataLoader already re-seeds Python's `random` per worker
+per epoch from `torch.initial_seed()`, so no `worker_init_fn` is needed.
+
+**Detection**: dump the first 5 batches at the start of training and again
+after one full epoch and compare — if `source[0,0,0,0]` matches across the two
+samples for the same `idx`, the determinism bug is present.
+
+**Re-evaluation needed**: exp27 / exp27e / exp28c / exp29 / exp29b / exp30
+metrics were all gathered with the bugged augmentation. The relative ordering
+between methods probably still holds (they shared the same bug), but absolute
+numbers and the 7k plateau may move with a fresh exp29b-style run.
+
 ---
 
 ## exp30 — corruption robustness fine-tune of exp29b (temporal)
@@ -378,6 +408,9 @@ logging for this run. Logfile saved to outdir.
 
 ## Open follow-ups (temporal)
 
+- **Re-run exp29b post aug-fix**: aug determinism bug fixed 2026-05-14 (see
+  Failure patterns). Re-run a 20k temporal training to see if the step-7k val
+  plateau actually moves now that each epoch sees fresh trajectories.
 - **exp29b results**: validate on nat1.mp4 after training completes. Compare
   lpips_sq/ssim vs exp28c to measure decoder LoRA benefit with correct LPIPS.
 - **Longer video test**: run all methods on a longer clip (>60 frames) to expose
