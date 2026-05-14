@@ -1970,11 +1970,239 @@ area) is the planned fix (exp24b).
 
 ## exp24b — exp23 + scale=2.0 crops (resize 1024→512, random crop 256)
 
-**Status: RUNNING 2026-05-11**
+**Status: DONE 2026-05-11**
 
 Hypothesis: scale=2.0 gives consistent stroke width (2x downscale from native)
 with manageable crop variance (1/4 image area vs 1/16 for scale=4.0 or ~full
-image for scale=1.10). Should recover exp23 quality with better stroke fidelity.
+image for scale=1.10).
+
+```bash
+python3 experiments/010_img2img_photo2comics/train.py \
+    data/photo2anime_1k/photo2anime_1k \
+    --steps 20000 --image-size 256 --batch-size 4 \
+    --lr 2e-4 --lr-min 1e-5 --lr-warmup-steps 500 --lr-cosine \
+    --grad-clip-norm 1.0 --no-source-encoder --source-dropout 0.0 \
+    --method flow --flow-sigma-noise 0.05 --amp bf16 \
+    --model-ch 88 --attn-resolutions "16,32,64" \
+    --lpips-weight 0.2 --lpips-aux-net vgg \
+    --aug-resize-scale 2.0 --aug-scale-jitter 0.0 \
+    --sample-panel-steps 20 --checkpoint-every 5000 \
+    --val-every 1000 --panel-every 1000 \
+    --outdir out/exp24b_lpipsvgg_scale2_noenc_attn163264_bf16_mc88_256px_20k
+```
+
+Results: lpips_sq=0.168, lpips_vgg=0.304, ssim=0.642
+
+**Worse than exp23** (scale=1.10). Intermediate scale (2x downscale) removes
+fine stroke variation but crops still cover less structure per sample than
+scale=1.10. No recovery spike seen (unlike scale=4.0), but quality ceiling is
+lower. scale=1.10 (resize to ~281px, ~full image visible) remains best.
+
+**Winner of exp23 vs exp24b**: exp23 → used as base for exp25.
+
+---
+
+## exp25 — exp23 recipe × 80k steps (long run)
+
+**Status: DONE 2026-05-12**
+
+Best recipe from ablation study (exp23: LPIPS-VGG, mc=88, attn 16/32/64, bf16,
+scale=1.10, no encoder) extended to 80k steps to test continued improvement.
+
+```bash
+python3 experiments/010_img2img_photo2comics/train.py \
+    data/photo2anime_1k/photo2anime_1k \
+    --steps 80000 --image-size 256 --batch-size 4 \
+    --lr 2e-4 --lr-min 1e-5 --lr-warmup-steps 500 --lr-cosine \
+    --grad-clip-norm 1.0 --no-source-encoder --source-dropout 0.0 \
+    --method flow --flow-sigma-noise 0.05 --amp bf16 \
+    --model-ch 88 --attn-resolutions "16,32,64" \
+    --lpips-weight 0.2 --lpips-aux-net vgg \
+    --aug-resize-scale 1.10 --aug-scale-jitter 0.10 \
+    --sample-panel-steps 20 --checkpoint-every 10000 \
+    --val-every 5000 --panel-every 5000 \
+    --wandb-run-name exp25_lpipsvgg_80k_from_exp23 \
+    --outdir out/exp25_lpipsvgg_80k_from_exp23
+```
+
+Checkpoint progression (validated with 25 batches, 20 sample steps, EMA):
+
+| step | lpips_sq | lpips_vgg | ssim  |
+|------|----------|-----------|-------|
+| 10k  | 0.133    | 0.243     | 0.671 |
+| 20k  | 0.128    | 0.234     | 0.688 |
+| 30k  | 0.124    | 0.228     | 0.698 |
+| 40k  | 0.120    | 0.223     | 0.702 |
+| 50k  | 0.117    | 0.219     | 0.708 |
+| 60k  | 0.116    | 0.218     | 0.711 |
+| 70k  | 0.116    | 0.218     | 0.712 |
+| 80k  | 0.115    | 0.217     | 0.712 |
+
+**Findings**: Monotonic improvement across all metrics. lpips_sq at 20k (0.128)
+exactly matches exp23, confirming recipe reproducibility. Improvement rate
+slows sharply after 60k: 10k→60k averages −0.005 lpips_sq per 10k steps;
+60k→80k gains only −0.001 total. **Diminishing returns past 60k steps.**
+Best checkpoint for deployment: 80k (final model.pt) — marginal gains justify
+the full run but 60k is nearly as good. SSIM 0.712 vs 0.557 source floor.
+
+---
+
+## exp26 — exp25 recipe, no LPIPS loss (flow only, ablation)
+
+**Status: KILLED 2026-05-12 (step ~40k)**
+
+Ablation: same as exp25 but `--lpips-weight 0.0`. Pure flow matching loss only.
+
+Results at available checkpoints:
+
+| step | lpips_sq | lpips_vgg | ssim  |
+|------|----------|-----------|-------|
+| 10k  | 0.174    | 0.316     | 0.607 |
+| 20k  | 0.162    | 0.306     | 0.626 |
+| 30k  | 0.172    | 0.309     | 0.625 |
+| 40k  | 0.180    | 0.309     | 0.633 |
+
+**Finding**: LPIPS loss is critical. Without it: −30% worse on lpips_vgg vs exp25
+at every step, metrics plateau/regress after 20k (flow loss optimises reconstruction
+but doesn't drive perceptual quality). VGG LPIPS is not redundant — it's the primary
+driver of visual quality improvement. Run killed early; no need to see 80k.
+
+---
+
+## exp31 — exp25 fine-tune at 512px with source corruption robustness
+
+**Status: IN PROGRESS 2026-05-13** (steps 80k→90k)
+
+Fine-tunes the exp25 checkpoint (best single-frame model) at 512×512 with source
+corruption to improve robustness to real-video blur and compression artifacts.
+
+Architecture: identical to exp25 (flow FM, mc=88, attn 16/32/64, no source encoder,
+LPIPS-VGG 0.2). All weights trainable (no freeze).
+
+**Key changes vs exp25**:
+- Resolution: 256px → 512px
+- Augmentation: `aug_resize_scale=2.0` (crops 512 from ~1024px images)
+- Source corruption per image (target always clean):
+  - 20% chance: no corruption (clean source)
+  - 80% chance: independently apply blur σ∼U[0.5,3.0] (70% prob) and/or
+    JPEG quality∼U[30,95] (70% prob)
+- LR: 2e-5 → 1e-6 cosine (vs 2e-4 for original exp25 — fine-tune rate)
+- 10k steps (resume step 80k → target 90k)
+
+```bash
+OUTDIR=out/exp31_corrupt512_$(date +%Y%m%d_%H%M%S)
+mkdir -p $OUTDIR
+PYTHONPATH=/tmp/extpkgs2:/home/researcher/workspace/nanoWarp \
+TORCH_HOME=/tmp/torch_home \
+MPLCONFIGDIR=/tmp/mplconfig \
+WANDB_API_KEY=wandb_v1_... \
+WANDB_CACHE_DIR=/tmp/wandb_cache \
+WANDB_CONFIG_DIR=/tmp/wandb_config \
+python3 experiments/010_img2img_photo2comics/train_exp31_corrupt512.py \
+    data/photo2anime_1k/photo2anime_1k \
+    --resume out/exp25_lpipsvgg_80k_from_exp23/model.pt \
+    --steps 10000 --image-size 512 --aug-resize-scale 2.0 \
+    --lr 2e-5 --lr-min 1e-6 --lr-warmup-steps 200 \
+    --corrupt-blur-max 3.0 --corrupt-jpeg-min 30 --clean-prob 0.2 \
+    --wandb --wandb-run-name exp31_corrupt512 \
+    --outdir $OUTDIR \
+    2>&1 | tee $OUTDIR/train.log
+```
+
+Outdir: `out/exp31_corrupt512_20260513_214306/`
+Wandb: https://wandb.ai/alx-spirin/nanoWarp/runs/4k1iquss
+
+**Wandb debug**: Earlier runs failed with `CommError: user is not logged in` despite
+`WANDB_API_KEY` set. Root cause: the stored API key had expired — `wandb.login()`
+returns `True` without verifying the key; the Go subprocess (`wandb-core`) is what
+actually calls the API and fails. Secondary issues: `~/.cache/wandb` and
+`~/.config/wandb` not writable → fixed with `WANDB_CACHE_DIR` and `WANDB_CONFIG_DIR`.
+Full debug notes in [captains_log_video.md#wandb-auth-failures](captains_log_video.md).
+
+**Val curve** (clean sources, ↓ better):
+
+| step  | lpips_sq | ssim   |
+|-------|----------|--------|
+| 81000 | 0.1447   | 0.6347 | ← same as exp25 (1k into fine-tune)
+| 82000 | 0.1622   | 0.6161 |
+| 84000 | 0.1767   | 0.6032 |
+| 86000 | 0.1794   | 0.6031 |
+| 88000 | 0.1853   | 0.5964 |
+| 90000 | 0.1824   | 0.5973 |
+
+**Conclusion**: clean-val degraded 0.1447 → 0.1824 (+26% LPIPS regression).
+Expected — same pattern as exp30 (temporal corruption). The model learns to
+de-corrupt sources, which changes its response to clean sources. For clean-source
+inference use exp25 (step 80k). For real-video compressed inputs, use exp31 final
+(step 90k) — nat1 nat1_step_09*.png frames will show whether it improved visually.
+
+Nat1 frame-0 panels saved every 1k steps in the outdir.
+
+---
+
+## exp32 — train from scratch, progressive 128→256→512px, full augmentation
+
+**Motivation**: exp31 showed fine-tuning from exp25 on corrupted inputs degrades clean-val
+(0.1447→0.1824). Training from scratch with progressive resolution and rich augmentation
+should produce a model that is simultaneously robust to real-video compression *and*
+high quality on clean sources, since it never overfit to clean-only training first.
+
+**Architecture**: identical to exp25 — mc=88, no source encoder (source in stem),
+attn_res=(16,32,64), flow FM, LPIPS-VGG weight 0.2, bf16 AMP.
+
+**Progressive phases**:
+
+| Phase | Steps | Resolution | BS | Effective 512px-equivalent steps |
+|-------|-------|------------|-----|----------------------------------|
+| 1     | 5k    | 128px      | 64  | ~80k (16× area ratio)            |
+| 2     | 20k   | 256px      | 16  | ~80k (4× area ratio)             |
+| 3     | 75k   | 512px      | 4   | 75k                              |
+
+**Augmentation** (per sample, randomized):
+
+Shared geometry (source + target):
+- Zoom scale ~ U[1.0, 2.5] → resize → random crop
+- Rotation ±25°
+- Perspective warp distortion=0.15, p=0.5
+- Horizontal flip p=0.5
+
+Source-only color jitter: brightness/contrast/saturation ±0.3
+
+Source-only degradation (80% of samples, gated by clean_prob=0.2):
+- Resize-down+up p=0.3 (factor ~ U[0.25, 0.75]) — "internet/compression" pixelation
+- Gaussian blur σ~U[0.5,3.0] p=0.7
+- JPEG quality~U[30,95] p=0.7
+
+**LR**: 2e-4 → 1e-6 cosine over 100k steps, warmup 500 steps.
+**Val/checkpoints**: val+panel+nat1 every 5k, checkpoint every 10k, best saved on val LPIPS.
+
+```bash
+OUTDIR=out/exp32_prog512_$(date +%Y%m%d_%H%M%S)
+mkdir -p $OUTDIR
+PYTHONPATH=/tmp/extpkgs2:/home/researcher/workspace/nanoWarp \
+TORCH_HOME=/tmp/torch_home \
+WANDB_API_KEY=wandb_v1_... \
+WANDB_CACHE_DIR=/tmp/wandb_cache \
+WANDB_CONFIG_DIR=/tmp/wandb_config \
+MPLCONFIGDIR=/tmp/mplconfig \
+python3 experiments/010_img2img_photo2comics/train_exp32_prog512.py \
+    data/photo2anime_1k/photo2anime_1k \
+    --wandb --wandb-run-name exp32_prog512 \
+    --outdir $OUTDIR \
+    2>&1 | tee $OUTDIR/train.log
+```
+
+Outdir: `out/exp32_prog512_20260514_033045/`
+Wandb: https://wandb.ai/alx-spirin/nanoWarp/runs/wes3p2ce
+
+Results: TBD (run in progress, 100k steps)
+
+---
+
+## Temporal / video experiments
+
+All temporal experiments (exp27 onwards) are documented in
+[captains_log_video.md](captains_log_video.md).
 
 ---
 
@@ -1997,8 +2225,9 @@ observed on exp08-noenc (0.163 sq vs 0.209 vgg). Always report both going forwar
 - **2026-05-11 lesson: native-res crops (scale=4.0) cause 6k-step loss spike
   recovery.** 256px crops from 1024px images capture 1/16 image area — too
   sparse. Background-heavy crops dominate early training; face-heavy crops
-  appear later and cause a loss jump. Use scale=2.0 (1/4 area) as baseline for
-  1024px source data.
+  appear later and cause a loss jump. scale=2.0 (1/4 area) avoids the spike
+  but still underperforms scale=1.10 (~full image). Confirmed ranking:
+  scale=1.10 > scale=2.0 >> scale=4.0 on lpips_vgg (0.234 vs 0.304 vs 0.449).
 
 - **2026-05-11 lesson: mc=176 hits capacity ceiling at 908 pairs/256px.**
   Both resize_conv and pixel_shuffle upsamplers showed periodic artifacts.

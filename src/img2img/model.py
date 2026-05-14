@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from torch.hub import load_state_dict_from_url
 
 from .colorspace import linear_to_srgb
+from .temporal import TemporalAttn
 
 
 RESNET18_URL = "https://download.pytorch.org/models/resnet18-f37072fd.pth"
@@ -265,6 +266,8 @@ class Img2ImgDiffusionUNet(nn.Module):
         attn_resolutions: tuple[int, ...] = (8,),
         image_size: int = 128,
         color_space: str = "srgb",
+        use_temporal: bool = False,
+        mask_channels: int = 0,
     ):
         super().__init__()
         if upsample_type not in ("resize_conv", "pixel_shuffle"):
@@ -279,6 +282,9 @@ class Img2ImgDiffusionUNet(nn.Module):
         self.attn_resolutions = tuple(sorted(set(int(r) for r in attn_resolutions)))
         self.image_size = image_size
         self.color_space = color_space
+        self.use_temporal = use_temporal
+        self.mask_channels = mask_channels
+        self._temporal_num_frames: int = 1  # set via set_temporal_frames()
         if use_source_encoder:
             self.source_encoder = SourceEncoder(
                 in_ch=3,
@@ -288,6 +294,17 @@ class Img2ImgDiffusionUNet(nn.Module):
         else:
             self.source_encoder = None
         self.time_mlp = TimeMLP(time_dim)
+
+        # WAN-style mask channel injection: a zero-init 1×1 conv adds to the
+        # stem features. Keeps in_conv shape unchanged → loads cleanly from any
+        # spatial checkpoint. mask=1 means "generate this frame", mask=0 means
+        # "this frame is a given anchor (e.g. reinject from previous chunk)".
+        c1_early = model_ch  # need c1 before the block below computes it
+        if mask_channels > 0:
+            self.mask_proj = nn.Conv2d(mask_channels, c1_early, 1, bias=False)
+            nn.init.zeros_(self.mask_proj.weight)
+        else:
+            self.mask_proj = None
 
         # UNet widths are multiples of model_ch (base = 64 in the original design).
         # Scaling model_ch scales the whole UNet by the same factor.
@@ -316,6 +333,25 @@ class Img2ImgDiffusionUNet(nn.Module):
         self.mid1 = ResBlock(c4, cm, time_dim * 4)
         self.mid_attn = BottleneckAttention(cm)
         self.mid2 = ResBlock(cm, cm, time_dim * 4)
+
+        # Temporal attention — inserted after every encoder/bottleneck/decoder block.
+        # AnimateDiff-style: all levels, zero-init gates → identity at init.
+        # Only created when use_temporal=True; absent modules keep state_dict clean.
+        # Temporal attention at all levels ≤128px. 256px skipped: B×HW=131072 exceeds
+        # CUDA attention kernel limits, and fine structure is already source-anchored.
+        ta = lambda ch: TemporalAttn(ch) if use_temporal else None
+        # 256px and 128px levels skipped: B×H×W too large for CUDA attention
+        # kernels at typical batch sizes. Temporal attention at 64px and below
+        # provides good consistency at manageable memory cost.
+        self.tattn1     = None       # 256px — skipped (B×HW > kernel limit)
+        self.tattn2     = None       # 128px — skipped (B×HW > kernel limit)
+        self.tattn3     = ta(c3)    # encoder 64px
+        self.tattn4     = ta(c4)    # encoder 32px
+        self.tattn_mid  = ta(cm)    # bottleneck 16px
+        self.tattn_dec4 = ta(c3)    # decoder 32px
+        self.tattn_dec3 = ta(c3)    # decoder 64px
+        self.tattn_dec2 = None      # 128px — skipped
+        self.tattn_dec1 = None      # 256px — skipped
 
         # Encoder-side resolutions for the four levels at this image_size.
         # h1 stays at image_size, then each ds halves.
@@ -359,56 +395,103 @@ class Img2ImgDiffusionUNet(nn.Module):
         self.out_norm = nn.GroupNorm(8, c1)
         self.out_conv = nn.Conv2d(c1, out_ch, 3, padding=1)
 
-    def forward(self, source: torch.Tensor, noisy_target: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    # ------------------------------------------------------------------
+    # Temporal state helpers
+    # ------------------------------------------------------------------
+
+    def _temporal_modules(self) -> list[TemporalAttn]:
+        return [ta for ta in (
+            self.tattn1, self.tattn2, self.tattn3, self.tattn4, self.tattn_mid,
+            self.tattn_dec4, self.tattn_dec3, self.tattn_dec2, self.tattn_dec1,
+        ) if ta is not None]
+
+    def set_temporal_frames(self, n: int) -> None:
+        """Set T before a forward pass over a sequence of n frames."""
+        self._temporal_num_frames = n
+        for ta in self._temporal_modules():
+            ta._num_frames = n
+
+    def reset_temporal(self) -> None:
+        """Clear prev KV state — call at the start of each new video."""
+        self._temporal_num_frames = 1
+        for ta in self._temporal_modules():
+            ta.reset()
+            ta._num_frames = 1
+
+    def detach_temporal_kv(self) -> None:
+        """Detach stored KV after chunk A so chunk B doesn't backprop through it."""
+        for ta in self._temporal_modules():
+            ta.detach_kv()
+
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
+
+    def forward(
+        self,
+        source: torch.Tensor,
+        noisy_target: torch.Tensor,
+        t: torch.Tensor,
+        frame_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         t_emb = self.time_mlp(t)
 
         stem_input = torch.cat([source, noisy_target], dim=1) if self.source_in_stem else noisy_target
         x0 = self.in_conv(stem_input)
+        # inject mask channel (zero-init → no effect at init)
+        if self.mask_proj is not None and frame_mask is not None:
+            x0 = x0 + self.mask_proj(frame_mask)
+
+        def _ta(feat, mod):
+            return mod(feat) if mod is not None else feat
 
         if self.use_source_encoder:
-            # Source encoder is ImageNet-pretrained ResNet18 → expects sRGB input.
-            # Convert from linear RGB at the boundary if we're training in linear.
             encoder_input = linear_to_srgb(source).clamp(0, 1) if self.color_space == "linear_rgb" else source
             src_feats = self.source_encoder(encoder_input)
             h1 = self.fuse1(self.down1(x0, t_emb), src_feats[0])
-            if self.attn1 is not None:
-                h1 = self.attn1(h1)
+            if self.attn1 is not None: h1 = self.attn1(h1)
+            h1 = _ta(h1, self.tattn1)
             h2 = self.fuse2(self.down2(self.ds1(h1), t_emb), src_feats[1])
-            if self.attn2 is not None:
-                h2 = self.attn2(h2)
+            if self.attn2 is not None: h2 = self.attn2(h2)
+            h2 = _ta(h2, self.tattn2)
             h3 = self.fuse3(self.down3(self.ds2(h2), t_emb), src_feats[2])
-            if self.attn3 is not None:
-                h3 = self.attn3(h3)
+            if self.attn3 is not None: h3 = self.attn3(h3)
+            h3 = _ta(h3, self.tattn3)
             h4 = self.fuse4(self.down4(self.ds3(h3), t_emb), src_feats[3])
-            if self.attn4 is not None:
-                h4 = self.attn4(h4)
+            if self.attn4 is not None: h4 = self.attn4(h4)
+            h4 = _ta(h4, self.tattn4)
             mid = self.mid1(self.ds4(h4), t_emb)
             mid = self.mid_fuse(mid, src_feats[4])
         else:
             h1 = self.down1(x0, t_emb)
-            if self.attn1 is not None:
-                h1 = self.attn1(h1)
+            if self.attn1 is not None: h1 = self.attn1(h1)
+            h1 = _ta(h1, self.tattn1)
             h2 = self.down2(self.ds1(h1), t_emb)
-            if self.attn2 is not None:
-                h2 = self.attn2(h2)
+            if self.attn2 is not None: h2 = self.attn2(h2)
+            h2 = _ta(h2, self.tattn2)
             h3 = self.down3(self.ds2(h2), t_emb)
-            if self.attn3 is not None:
-                h3 = self.attn3(h3)
+            if self.attn3 is not None: h3 = self.attn3(h3)
+            h3 = _ta(h3, self.tattn3)
             h4 = self.down4(self.ds3(h3), t_emb)
-            if self.attn4 is not None:
-                h4 = self.attn4(h4)
+            if self.attn4 is not None: h4 = self.attn4(h4)
+            h4 = _ta(h4, self.tattn4)
             mid = self.mid1(self.ds4(h4), t_emb)
         mid = self.mid_attn(mid)
+        mid = _ta(mid, self.tattn_mid)
         mid = self.mid2(mid, t_emb)
 
         x = self.up4(mid)
         x = self.dec4(torch.cat([x, h4], dim=1), t_emb)
+        x = _ta(x, self.tattn_dec4)
         x = self.up3(x)
         x = self.dec3(torch.cat([x, h3], dim=1), t_emb)
+        x = _ta(x, self.tattn_dec3)
         x = self.up2(x)
         x = self.dec2(torch.cat([x, h2], dim=1), t_emb)
+        x = _ta(x, self.tattn_dec2)
         x = self.up1(x)
         x = self.dec1(torch.cat([x, h1], dim=1), t_emb)
+        x = _ta(x, self.tattn_dec1)
 
         return self.out_conv(F.silu(self.out_norm(x)))
 
