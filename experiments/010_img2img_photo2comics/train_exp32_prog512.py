@@ -410,6 +410,11 @@ def parse_args():
     p.add_argument("--log-every", type=int, default=100)
     p.add_argument("--val-every", type=int, default=5_000)
     p.add_argument("--val-batches", type=int, default=8)
+    p.add_argument("--val-image-size", type=int, default=0,
+                   help="Validation/panel resolution. 0 (default) = use the final phase's "
+                        "resolution (= the phase that contains args.steps; for single-phase "
+                        "256 runs that's 256, for full progressive 128→256→512 it's 512). "
+                        "Set explicitly to pin val at a fixed res.")
     p.add_argument("--panel-every", type=int, default=5_000)
     p.add_argument("--checkpoint-every", type=int, default=10_000)
     p.add_argument("--best-every", type=int, default=5_000,
@@ -501,7 +506,12 @@ def infer_nat1(ema_model, diffusion, args, device, step, outdir):
             return
         frame_np = frames[0].numpy()
         frame_t = torch.from_numpy(frame_np).permute(2, 0, 1).float() / 255.0
-        frame_t = TF.resize(frame_t, [512, 512], antialias=True)
+        # Match the val/panel resolution so nat1 panels compare apples-to-apples
+        # to the val curves.
+        infer_size = args.val_image_size if args.val_image_size > 0 else (
+            next(res for end, res, _ in PHASES if args.steps <= end)
+        )
+        frame_t = TF.resize(frame_t, [infer_size, infer_size], antialias=True)
         source = frame_t.unsqueeze(0).to(device)
 
         ema_model.eval()
@@ -622,8 +632,16 @@ def main():
     print(f"degrade  clean_prob={args.clean_prob}  resize_prob={args.degrade_resize_prob}@[{args.degrade_resize_min},{args.degrade_resize_max}]  "
           f"blur_max={args.corrupt_blur_max}@p={args.corrupt_blur_prob}  jpeg_min={args.corrupt_jpeg_min}@p={args.corrupt_jpeg_prob}")
 
-    # Fixed val loader at 512px (no corruption)
-    val_loader_512 = make_loader(val_pairs, 512, args.bs_512, args, val=True)
+    # Val/panel loader at the final-phase resolution (or --val-image-size if set).
+    # Keeping val res fixed across the whole run makes val curves comparable
+    # step-to-step. For the original progressive 128→256→512 recipe that's
+    # 512; for the single-phase 256 runs (exp33+) it's 256.
+    final_image_size = next(res for end, res, _ in PHASES if args.steps <= end)
+    val_image_size = args.val_image_size if args.val_image_size > 0 else final_image_size
+    val_bs = next(bs for end, _, bs in PHASES if args.steps <= end)
+    val_loader = make_loader(val_pairs, val_image_size, val_bs, args, val=True)
+    print(f"[val] loader built at image_size={val_image_size}  bs={val_bs}  "
+          f"(final-phase res; override with --val-image-size)")
 
     # --- training state ---
     losses: list[float] = []
@@ -725,7 +743,7 @@ def main():
             print(f"[ckpt] saved {ckpt_path}")
 
         if step % args.val_every == 0 or step % args.best_every == 0:
-            val_lpips = run_val(ema.model, diffusion, val_loader_512, args, device, step, outdir, wandb)
+            val_lpips = run_val(ema.model, diffusion, val_loader, args, device, step, outdir, wandb)
             infer_nat1(ema.model, diffusion, args, device, step, outdir)
 
             if val_lpips < best_lpips:
@@ -737,7 +755,7 @@ def main():
                     wandb.log({"val/best_lpips_sq": best_lpips}, step=step)
 
         if step % args.panel_every == 0:
-            save_panel(ema.model, diffusion, val_loader_512, args, device, step, outdir)
+            save_panel(ema.model, diffusion, val_loader, args, device, step, outdir)
 
     # Final save
     fp = (args.exp_name + "_") if args.exp_name else ""
