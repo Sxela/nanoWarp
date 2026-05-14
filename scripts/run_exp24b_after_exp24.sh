@@ -5,7 +5,8 @@ cd /home/researcher/workspace/nanoWarp
 export PYTHONPATH=.:/tmp/extpkgs2
 export TORCH_HOME=/tmp/torch_home
 export MPLCONFIGDIR=/tmp/mpl
-export WANDB_API_KEY=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
+# WANDB_API_KEY must be set in the launching shell. Never commit keys.
+: "${WANDB_API_KEY:?Set WANDB_API_KEY in your env before running this script.}"
 
 echo "[pipeline] waiting for exp24 to finish..."
 while [ ! -f "out/exp24_lpipsvgg_nozoom_noenc_attn163264_bf16_mc88_256px_20k/model.pt" ]; do
