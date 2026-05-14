@@ -119,6 +119,59 @@ def save_inference_panel(source: torch.Tensor, output: torch.Tensor, path: str |
     canvas.save(path)
 
 
+def save_video_panel(
+    source: torch.Tensor,   # (T, 3, H, W)
+    target: torch.Tensor,   # (T, 3, H, W)
+    output: torch.Tensor,   # (T, 3, H, W)
+    path: str | Path,
+    fps: int = 8,
+) -> None:
+    """Save a temporal clip as a PNG contact sheet (source | target | output per frame)
+    and optionally as an MP4 if ffmpeg is available.
+
+    PNG layout: rows = frames, columns = [source, target, output].
+    MP4: same layout, one row per frame at `fps`.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    T = source.shape[0]
+
+    frames_pil: list[Image.Image] = []
+    for t in range(T):
+        src_pil = _with_label(_tensor_to_pil(source[t]), f"src t={t}")
+        tgt_pil = _with_label(_tensor_to_pil(target[t]), f"tgt t={t}")
+        out_pil = _with_label(_tensor_to_pil(output[t]), f"out t={t}")
+        W = src_pil.width
+        H = src_pil.height
+        row = Image.new("RGB", (W * 3, H), "#f5f5f5")
+        row.paste(src_pil, (0, 0))
+        row.paste(tgt_pil, (W, 0))
+        row.paste(out_pil, (W * 2, 0))
+        frames_pil.append(row)
+
+    # contact sheet: all frames stacked vertically
+    sheet_w = frames_pil[0].width
+    sheet_h = sum(f.height for f in frames_pil)
+    sheet = Image.new("RGB", (sheet_w, sheet_h), "white")
+    y = 0
+    for f in frames_pil:
+        sheet.paste(f, (0, y))
+        y += f.height
+    png_path = path.with_suffix(".png")
+    sheet.save(png_path)
+
+    # animated GIF (always available via Pillow)
+    gif_path = path.with_suffix(".gif")
+    delay_ms = max(1, int(1000 / fps))
+    frames_pil[0].save(
+        gif_path,
+        save_all=True,
+        append_images=frames_pil[1:],
+        duration=delay_ms,
+        loop=0,
+    )
+
+
 def save_progress_strip(frames: list[torch.Tensor], path: str | Path, sample_idx: int = 0):
     if not frames:
         return
