@@ -2240,14 +2240,57 @@ similar pattern. If present, follow-up with `--aug-scale-max 1.5`.
 
 ---
 
-## exp34 — exp33 recipe + in-model source feature pyramid + FiLM
+## exp34 — exp33 recipe + symmetric decoder spatial self-attention
 
 **Status: WIRED 2026-05-14** (ready to launch after exp33 settles)
 
 Clean A/B vs exp33 (same data, same aug, same compute budget) to isolate
-the contribution of a permanent in-model source feature pyramid. Single
-architectural delta vs exp33: adds `SourcePyramid` + per-decoder-level
-`FiLM` modulation.
+the contribution of putting `BottleneckAttention` on the decoder side at
+the same resolutions as the encoder. Closes the long-standing asymmetry
+in nanoWarp's UNet, which had spatial self-attn only in encoder + bottleneck
+and never in the decoder (vs SD/SDXL convention which puts it symmetrically).
+
+**Architecture delta vs exp33** — with `attn_resolutions = (16, 32, 64)`
+and `image_size = 256`:
+- `attn_dec4` at H/8 (32px), channels c3=352 — mirrors `attn4`
+- `attn_dec3` at H/4 (64px), channels c3=352 — mirrors `attn3`
+- `attn_dec2` at H/2 (128px) — None (128 ∉ attn_set)
+- `attn_dec1` at H (256px) — None (256 ∉ attn_set)
+- 16px bottleneck `mid_attn` already always on, unchanged.
+
+Each `attn_dec*` is applied after the corresponding `dec*` ResBlock,
+before any FiLM/tattn hooks.
+
+**Gating**: `--use-decoder-attn` flag (default off → exp33 behaviour). When
+on, the decoder attn modules are instantiated at exactly the same
+resolutions as the encoder attn — single `attn_resolutions` knob controls
+both.
+
+**Why test this first** (before pyramid): cheapest mechanism, single
+boolean flag, no new modules; just toggling the symmetric architecture.
+If decoder attn alone moves the needle, exp35 (pyramid) builds on top of it.
+
+**Recipe**: identical to exp33 except `--use-decoder-attn` is passed.
+
+```bash
+WANDB_API_KEY=... bash scripts/run_exp34_decoder_attn_at_exp33_recipe.sh
+```
+
+Script: `scripts/run_exp34_decoder_attn_at_exp33_recipe.sh`
+Outdir: `out/exp34_decoder_attn_noenc_attn163264_bf16_mc88_256px_20k`
+
+Results: TBD.
+
+---
+
+## exp35 — exp34 (or exp33) recipe + in-model source feature pyramid + FiLM
+
+**Status: WIRED 2026-05-14** (ready to launch after exp34 settles)
+
+Clean A/B vs the previous best of {exp33, exp34} (whichever wins) to
+isolate the contribution of a permanent in-model source feature pyramid.
+Single architectural delta on top of that baseline: adds `SourcePyramid`
++ per-decoder-level `FiLM` modulation.
 
 **Architecture**:
 - `SourcePyramid` ([src/img2img/source_pyramid.py](../src/img2img/source_pyramid.py)):
@@ -2258,24 +2301,25 @@ architectural delta vs exp33: adds `SourcePyramid` + per-decoder-level
 - `FiLM` (same file): per-decoder-level 1×1 conv produces (γ, β) from a
   pyramid feature; decoder activation becomes `x * (1 + γ) + β`. Both γ and
   β zero-init → identity at init. ~573k params total across the 4 levels.
-- Net: ~2.4M extra params over exp33 (total ~51M, up from ~49M).
+- Net: ~2.4M extra params over the baseline (49M → ~51M).
 
 **Why FiLM not cross-attention** (first try): half the params, no head-dim
 hyperparams, identity-at-init for free. If FiLM shows even modest gain we
 can iterate to cross-attn later.
 
 **Why no inference-time external deps**: pyramid is part of the UNet and
-ships in the same checkpoint as everything else. The pyramid is the
-permanent in-model alternative to the optional ResNet18 source encoder.
+ships in the same checkpoint as everything else. Permanent in-model
+alternative to the optional ResNet18 source encoder.
 
-**Recipe**: identical to exp33 except `--use-source-pyramid` is passed.
+**Recipe**: same as the baseline plus `--use-source-pyramid`. If exp34
+wins, also pass `--use-decoder-attn` to stack on top.
 
 ```bash
-WANDB_API_KEY=... bash scripts/run_exp34_pyramid_at_exp33_recipe.sh
+WANDB_API_KEY=... bash scripts/run_exp35_pyramid_at_exp33_recipe.sh
 ```
 
-Script: `scripts/run_exp34_pyramid_at_exp33_recipe.sh`
-Outdir: `out/exp34_pyramid_film_noenc_attn163264_bf16_mc88_256px_20k`
+Script: `scripts/run_exp35_pyramid_at_exp33_recipe.sh`
+Outdir: `out/exp35_pyramid_film_noenc_attn163264_bf16_mc88_256px_20k`
 
 **Compute redundancy**: pyramid output is independent of t, so it
 recomputes wastefully across the 20 ODE steps at inference. Pyramid is
@@ -2286,11 +2330,12 @@ demands it.
 Results: TBD.
 
 **Architecture diagram**: [docs/model_architecture.html](model_architecture.html)
-(self-contained HTML/SVG; shows the full UNet, optional modules, and the
-exp34 source pyramid + FiLM hooks).
+(self-contained HTML/SVG; shows the full UNet, the sub-block structure
+within each level — ResBlock → attn? → FiLM? → tattn? — and the exp35
+source pyramid + FiLM hooks).
 
-Next experiments (queued, contingent on exp34 result):
-- **exp35** — U-DiT bottleneck: replace `mid_attn` / `mid1` / `mid2` with
+Next experiments (queued, contingent on exp34/35 results):
+- **exp36** — U-DiT bottleneck: replace `mid_attn` / `mid1` / `mid2` with
   4–6 transformer blocks at the 16×16 level. Same param budget, different
   long-range mixing.
 

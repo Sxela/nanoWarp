@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# exp34 — exp33 recipe (20k @ 256px, bs=4, full exp32 aug stack) + in-model
+# exp35 — exp33 recipe (20k @ 256px, bs=4, full exp32 aug stack) + in-model
 # source feature pyramid + FiLM modulation of the decoder.
 #
 # Clean A/B vs exp33 (same data, same aug, same compute) to isolate the
@@ -26,7 +26,7 @@ export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-/tmp/wandb_cache}"
 export WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR:-/tmp/wandb_config}"
 : "${WANDB_API_KEY:?Set WANDB_API_KEY in your env before running this script.}"
 
-OUTDIR=out/exp34_pyramid_film_noenc_attn163264_bf16_mc88_256px_20k
+OUTDIR=out/exp35_pyramid_film_noenc_attn163264_bf16_mc88_256px_20k
 mkdir -p "$OUTDIR"
 
 python3 experiments/010_img2img_photo2comics/train_exp32_prog512.py \
@@ -54,18 +54,18 @@ python3 experiments/010_img2img_photo2comics/train_exp32_prog512.py \
     --sample-steps 20 \
     --wandb \
     --wandb-project nanoWarp \
-    --wandb-run-name exp34_pyramid_film_at_exp33_recipe \
-    --wandb-tags "exp34,ds1k,256px,noenc,attn163264,bf16,mc88,lpips_vgg,exp32_aug_stack,source_pyramid,film,ablation_vs_exp33" \
+    --wandb-run-name exp35_pyramid_film_at_exp33_recipe \
+    --wandb-tags "exp35,ds1k,256px,noenc,attn163264,bf16,mc88,lpips_vgg,exp32_aug_stack,source_pyramid,film,ablation_vs_exp33" \
     --outdir "$OUTDIR" \
     2>&1 | tee "$OUTDIR/train.log"
 
-echo "[exp34] training done. Running final val (25 batches, EMA, sample_steps=20)..."
+echo "[exp35] training done. Running final val (25 batches, EMA, sample_steps=20)..."
 
 python3 experiments/010_img2img_photo2comics/validate.py \
     data/photo2anime_1k/photo2anime_1k \
     --checkpoint "$OUTDIR/model.pt" \
     --image-size 256 --batch-size 4 --max-batches 25 --sample-steps 20 --use-ema \
-    --outdir "out/val_exp34_final_256px" \
-    2>&1 | tee "out/val_exp34_final_256px.log"
+    --outdir "out/val_exp35_final_256px" \
+    2>&1 | tee "out/val_exp35_final_256px.log"
 
-echo "[exp34] done. Compare lpips_vgg vs exp33 (out/val_exp33_final_256px/val_metrics.json)."
+echo "[exp35] done. Compare lpips_vgg vs exp33 (out/val_exp33_final_256px/val_metrics.json)."

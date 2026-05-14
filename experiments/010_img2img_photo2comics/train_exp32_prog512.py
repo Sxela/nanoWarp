@@ -345,6 +345,10 @@ def parse_args():
     p.add_argument("--use-source-pyramid", action="store_true",
                    help="Enable in-model SourcePyramid + FiLM modulation of the decoder. "
                         "~2.4M extra params at mc=88. Zero-init FiLM → identity at init.")
+    p.add_argument("--use-decoder-attn", action="store_true",
+                   help="Mirror encoder attn on the decoder side: BottleneckAttention "
+                        "at the same resolutions (attn_resolutions) operating on decoder "
+                        "output channels. ~SD/SDXL convention.")
     # phase schedule overrides (end steps)
     p.add_argument("--phase1-end", type=int, default=5_000,   help="Last step of 128px phase")
     p.add_argument("--phase2-end", type=int, default=25_000,  help="Last step of 256px phase")
@@ -561,6 +565,7 @@ def main():
         attn_resolutions=attn_res,
         image_size=512,   # model built at 512; handles smaller inputs fine
         use_source_pyramid=args.use_source_pyramid,
+        use_decoder_attn=args.use_decoder_attn,
     ).to(device)
 
     total = sum(p.numel() for p in model.parameters())

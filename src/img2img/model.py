@@ -270,6 +270,7 @@ class Img2ImgDiffusionUNet(nn.Module):
         use_temporal: bool = False,
         mask_channels: int = 0,
         use_source_pyramid: bool = False,
+        use_decoder_attn: bool = False,
     ):
         super().__init__()
         if upsample_type not in ("resize_conv", "pixel_shuffle"):
@@ -287,6 +288,7 @@ class Img2ImgDiffusionUNet(nn.Module):
         self.use_temporal = use_temporal
         self.mask_channels = mask_channels
         self.use_source_pyramid = use_source_pyramid
+        self.use_decoder_attn = use_decoder_attn
         self._temporal_num_frames: int = 1  # set via set_temporal_frames()
         if use_source_encoder:
             self.source_encoder = SourceEncoder(
@@ -374,6 +376,27 @@ class Img2ImgDiffusionUNet(nn.Module):
         self.attn2 = BottleneckAttention(level_channels[1]) if level_resolutions[1] in attn_set else None
         self.attn3 = BottleneckAttention(level_channels[2]) if level_resolutions[2] in attn_set else None
         self.attn4 = BottleneckAttention(level_channels[3]) if level_resolutions[3] in attn_set else None
+
+        # Optional decoder-side spatial self-attention, mirroring the encoder.
+        # SD/SDXL UNets put attn symmetrically on encoder + decoder; ours
+        # originally only had encoder attn + mid_attn, leaving the decoder
+        # without spatial mixing at any resolution. With use_decoder_attn=True
+        # we add BottleneckAttention at the same resolutions as encoder attn
+        # but operating on decoder output channels.
+        #   dec4 output → c3 @ H/8
+        #   dec3 output → c3 @ H/4
+        #   dec2 output → c2 @ H/2
+        #   dec1 output → c1 @ H
+        if use_decoder_attn:
+            self.attn_dec4 = BottleneckAttention(c3) if level_resolutions[3] in attn_set else None
+            self.attn_dec3 = BottleneckAttention(c3) if level_resolutions[2] in attn_set else None
+            self.attn_dec2 = BottleneckAttention(c2) if level_resolutions[1] in attn_set else None
+            self.attn_dec1 = BottleneckAttention(c1) if level_resolutions[0] in attn_set else None
+        else:
+            self.attn_dec4 = None
+            self.attn_dec3 = None
+            self.attn_dec2 = None
+            self.attn_dec1 = None
 
         if use_source_encoder:
             # SourceEncoder (ResNet18) feature widths are fixed: 64, 64, 128, 256, 512.
@@ -514,18 +537,22 @@ class Img2ImgDiffusionUNet(nn.Module):
 
         x = self.up4(mid)
         x = self.dec4(torch.cat([x, h4], dim=1), t_emb)
+        if self.attn_dec4 is not None: x = self.attn_dec4(x)
         x = _film(x, self.film_dec4, 3)   # H/8 source feat
         x = _ta(x, self.tattn_dec4)
         x = self.up3(x)
         x = self.dec3(torch.cat([x, h3], dim=1), t_emb)
+        if self.attn_dec3 is not None: x = self.attn_dec3(x)
         x = _film(x, self.film_dec3, 2)   # H/4 source feat
         x = _ta(x, self.tattn_dec3)
         x = self.up2(x)
         x = self.dec2(torch.cat([x, h2], dim=1), t_emb)
+        if self.attn_dec2 is not None: x = self.attn_dec2(x)
         x = _film(x, self.film_dec2, 1)   # H/2 source feat
         x = _ta(x, self.tattn_dec2)
         x = self.up1(x)
         x = self.dec1(torch.cat([x, h1], dim=1), t_emb)
+        if self.attn_dec1 is not None: x = self.attn_dec1(x)
         x = _film(x, self.film_dec1, 0)   # H source feat
         x = _ta(x, self.tattn_dec1)
 
