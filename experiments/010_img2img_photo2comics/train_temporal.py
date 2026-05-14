@@ -210,6 +210,7 @@ def main():
         image_size=args.image_size, spatial_scale=args.spatial_scale,
         num_frames=args.num_frames, max_pan_frac=0.15,
         zoom_range=(1.0, 1.0), horizontal_flip_prob=0.0,
+        deterministic=True,
     )
     val_ds = TemporalPairedDataset(args.data_root, split="val", config=val_aug_cfg)
 

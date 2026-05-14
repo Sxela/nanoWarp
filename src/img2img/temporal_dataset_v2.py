@@ -46,6 +46,10 @@ class TemporalAugConfig:
     horizontal_flip_prob: float = 0.5
     # WAN-style: probability that frame 0 is designated as an anchor frame
     anchor_prob: float = 0.5
+    # If True, augmentation is seeded per-index → identical clip every epoch
+    # (use for validation). If False, uses the worker's RNG → fresh trajectory
+    # each call. Default False so training gets real augmentation diversity.
+    deterministic: bool = False
 
 
 def _list_pairs(
@@ -118,7 +122,9 @@ class TemporalPairedDataset(Dataset):
         T = cfg.num_frames
         img_size = cfg.image_size
 
-        rng = random.Random(idx)
+        # Train: module-level random → worker-seeded, varies every epoch.
+        # Val: Random(idx) → identical clip per index, comparable curves.
+        rng = random.Random(idx) if cfg.deterministic else random
 
         src_img = Image.open(src_path).convert("RGB")
         tgt_img = Image.open(tgt_path).convert("RGB")

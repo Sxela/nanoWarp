@@ -36,6 +36,10 @@ class TemporalAugConfig:
     max_pan_frac: float = 0.25   # max total pan as fraction of (resized - crop) range
     zoom_range: tuple[float, float] = field(default_factory=lambda: (0.90, 1.10))
     horizontal_flip_prob: float = 0.5
+    # If True, augmentation is seeded per-index → identical clip every epoch
+    # (use for validation). If False, uses the worker's RNG → fresh trajectory
+    # each call. Default False so training gets real augmentation diversity.
+    deterministic: bool = False
 
 
 def _list_pairs(root: Path, source_dir: str = "source", target_dir: str = "target",
@@ -108,7 +112,9 @@ class TemporalPairedDataset(Dataset):
         total_frames = T * 2
         img_size = cfg.image_size
 
-        rng = random.Random(idx)  # deterministic per-index for reproducibility
+        # Train: module-level random → worker-seeded, varies every epoch.
+        # Val: Random(idx) → identical clip per index, comparable curves.
+        rng = random.Random(idx) if cfg.deterministic else random
 
         src_img = _load_rgb(src_path)
         tgt_img = _load_rgb(tgt_path)
