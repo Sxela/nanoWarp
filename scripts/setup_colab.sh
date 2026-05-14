@@ -32,7 +32,8 @@ pip install --quiet \
     lpips \
     torchmetrics \
     av \
-    pyyaml
+    pyyaml \
+    opencv-python
 
 # ---------------------------------------------------------------------------
 # Data layout

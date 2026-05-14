@@ -1,13 +1,88 @@
 from __future__ import annotations
 
 import io
+from typing import Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 from PIL import Image
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+
+try:
+    import cv2  # type: ignore
+    _CV2_AVAILABLE = True
+except ImportError:
+    _CV2_AVAILABLE = False
+
+
+def _build_face_detector(min_confidence: float = 0.5):
+    """Build an OpenCV Haar-cascade frontal face detector, or None if cv2 missing.
+
+    Note: `min_confidence` is accepted for API parity with the previous
+    MediaPipe-based detector but isn't applicable to Haar cascades; the
+    detection threshold is governed by `minNeighbors` in the detect call.
+    """
+    del min_confidence
+    if not _CV2_AVAILABLE:
+        return None
+    import os
+    path = os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml")
+    detector = cv2.CascadeClassifier(path)
+    if detector.empty():
+        return None
+    return detector
+
+
+def face_crops(
+    source: torch.Tensor,
+    target: torch.Tensor,
+    sample: torch.Tensor,
+    face_detector,
+    crop_size: int = 128,
+    min_face_px: int = 16,
+) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """Detect faces in `source`, crop the same bbox from all three tensors, resize.
+
+    Args:
+        source, target, sample: (B, 3, H, W) float in [0, 1] on any device.
+        face_detector: a MediaPipe FaceDetection instance (or None → returns None,None,None).
+        crop_size: square output size for each crop.
+        min_face_px: discard detections whose bbox is smaller than this on either side.
+
+    Returns:
+        Three tensors of shape (N, 3, crop_size, crop_size) — face crops from
+        source, target, sample respectively, stacked across all detected faces
+        in the batch. N may be 0 (or all None) if no faces were detected.
+    """
+    if face_detector is None:
+        return None, None, None
+    B, _, H, W = source.shape
+    src_crops, tgt_crops, smp_crops = [], [], []
+    for i in range(B):
+        src_np = (source[i].permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+        gray = cv2.cvtColor(src_np, cv2.COLOR_RGB2GRAY)
+        # detectMultiScale → array of (x, y, w, h) per face in pixel coords.
+        faces = face_detector.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3,
+                                               minSize=(min_face_px, min_face_px))
+        for (x, y, w, h) in faces:
+            x0, y0 = int(x), int(y)
+            x1, y1 = min(W, x0 + int(w)), min(H, y0 + int(h))
+            if (x1 - x0) < min_face_px or (y1 - y0) < min_face_px:
+                continue
+            for crops, src in ((src_crops, source), (tgt_crops, target), (smp_crops, sample)):
+                patch = src[i:i+1, :, y0:y1, x0:x1]
+                patch = F.interpolate(patch, size=(crop_size, crop_size), mode="bilinear", align_corners=False)
+                crops.append(patch[0])
+    if not src_crops:
+        return None, None, None
+    return (
+        torch.stack(src_crops),
+        torch.stack(tgt_crops),
+        torch.stack(smp_crops),
+    )
 
 
 def val_corrupt(source: torch.Tensor, jpeg_q: int = 60,

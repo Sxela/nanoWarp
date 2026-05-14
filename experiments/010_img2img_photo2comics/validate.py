@@ -11,7 +11,7 @@ from src.img2img import IdentityPairedAugment, Img2ImgDiffusionUNet, PairedImage
 from src.img2img.colorspace import linear_to_srgb
 from src.img2img.diffusion import DiffusionConfig, GaussianImageDiffusion
 from src.img2img.flow import FlowConfig, RectifiedImageFlow
-from src.img2img.metrics import ValidationMetrics, val_corrupt
+from src.img2img.metrics import ValidationMetrics, _build_face_detector, face_crops, val_corrupt
 from src.img2img.render import save_progress_strip, save_val_panel
 from src.utils.config import apply_yaml_config
 
@@ -161,6 +161,16 @@ def main():
     ssim_vals_corr = []
     lpips_vals_corr = []
     lpips_vgg_vals_corr = []
+    # Face-region metrics: detect faces in source, crop same bbox from
+    # sample/target, score the crops. Skipped when mediapipe isn't installed
+    # or when no faces are found in a batch.
+    face_detector = _build_face_detector(min_confidence=0.5)
+    if face_detector is None:
+        print("[face] cv2 not installed — face-region metrics skipped")
+    face_ssim_vals = []
+    face_lpips_vals = []
+    face_lpips_vgg_vals = []
+    n_faces_total = 0
     panels_written = 0
     for batch_idx, batch in enumerate(dl):
         if batch_idx >= args.max_batches:
@@ -241,6 +251,19 @@ def main():
         lpips_vals_corr.append(m_corr["lpips_squeeze"])
         lpips_vgg_vals_corr.append(m_corr["lpips_vgg"])
 
+        # --- face-region metrics (clean source pass) ---
+        if face_detector is not None:
+            src_f, tgt_f, smp_f = face_crops(
+                to_display(source), to_display(target), to_display(samples),
+                face_detector, crop_size=128,
+            )
+            if src_f is not None:
+                n_faces_total += src_f.shape[0]
+                m_face = metrics_fn.compute(smp_f, tgt_f)
+                face_ssim_vals.append(m_face["ssim"])
+                face_lpips_vals.append(m_face["lpips_squeeze"])
+                face_lpips_vgg_vals.append(m_face["lpips_vgg"])
+
     def _mean(xs):
         return sum(xs) / max(len(xs), 1)
 
@@ -267,6 +290,14 @@ def main():
         # smaller ones if the aug stack is paying off.
         "delta_lpips_vgg": _mean(lpips_vgg_vals_corr) - _mean(lpips_vgg_vals),
         "delta_lpips_squeeze": _mean(lpips_vals_corr) - _mean(lpips_vals),
+        # Face-region metrics: same val pairs but cropped to detected face
+        # bboxes (source-side detection, identical crop on all three tensors)
+        # then resized to 128 before scoring. None if mediapipe missing or
+        # no faces found.
+        "num_faces_total": n_faces_total,
+        "mean_face_ssim": _mean(face_ssim_vals) if face_ssim_vals else None,
+        "mean_face_lpips_squeeze": _mean(face_lpips_vals) if face_lpips_vals else None,
+        "mean_face_lpips_vgg": _mean(face_lpips_vgg_vals) if face_lpips_vgg_vals else None,
         "train_config": train_cfg,
     }
     with open(outdir / "val_metrics.json", "w") as f:
