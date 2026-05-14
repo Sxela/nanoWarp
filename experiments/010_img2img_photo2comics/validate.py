@@ -17,11 +17,17 @@ from src.utils.config import apply_yaml_config
 
 
 def build_method_from_ckpt(ckpt: dict, device: torch.device):
-    method = ckpt.get("method", "diffusion")
-    cfg_dict = ckpt.get("diffusion", {})
+    # Older single-stage runs saved {"method": "...", "diffusion": cfg_dict}.
+    # exp32+ saves the flow config under the "flow" key and omits "method",
+    # so infer "flow" when that key is present and there's no explicit method.
+    method = ckpt.get("method")
+    if method is None:
+        method = "flow" if "flow" in ckpt else "diffusion"
     if method == "flow":
+        cfg_dict = ckpt.get("flow", ckpt.get("diffusion", {}))
         cfg = FlowConfig(**cfg_dict)
         return RectifiedImageFlow(cfg, device), cfg, method
+    cfg_dict = ckpt.get("diffusion", {})
     cfg = DiffusionConfig(**cfg_dict)
     return GaussianImageDiffusion(cfg, device), cfg, method
 

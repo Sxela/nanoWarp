@@ -545,6 +545,7 @@ def save_checkpoint(model, ema, flow_cfg, args, step, path):
         "model": model.state_dict(),
         "ema_model": ema.model.state_dict(),
         "config": config,
+        "method": "flow",
         "flow": flow_cfg.__dict__,
     }, path)
 
