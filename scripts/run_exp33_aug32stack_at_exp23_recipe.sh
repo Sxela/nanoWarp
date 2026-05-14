@@ -15,7 +15,9 @@ set -euo pipefail
 # Run from the repo root regardless of where the script is invoked from.
 cd "$(dirname "$0")/.."
 
-export PYTHONPATH="${PYTHONPATH:-.}"
+# Prepend repo root to PYTHONPATH (don't skip if PYTHONPATH is already set —
+# Colab pre-populates it, which would shadow `src/` otherwise).
+export PYTHONPATH=".${PYTHONPATH:+:$PYTHONPATH}"
 export TORCH_HOME="${TORCH_HOME:-/tmp/torch_home}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/mpl}"
 export WANDB_CACHE_DIR="${WANDB_CACHE_DIR:-/tmp/wandb_cache}"

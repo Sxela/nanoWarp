@@ -38,6 +38,7 @@ import io
 import json
 import math
 import random
+import time
 from contextlib import nullcontext
 from pathlib import Path
 
@@ -606,6 +607,10 @@ def main():
     print(f"phases: {PHASES}")
     print(f"training 0→{args.steps} steps")
 
+    t_start = time.monotonic()
+    t_window = t_start
+    step_window = 0
+
     for step in range(1, args.steps + 1):
         # --- phase transition ---
         new_phase_idx = next(i for i, (end, _, _) in enumerate(PHASES) if step <= end)
@@ -655,14 +660,36 @@ def main():
         ema.update(model)
         losses.append(loss_val)
 
+        step_window += 1
         if step % args.log_every == 0:
             avg = sum(losses[-args.log_every:]) / min(args.log_every, len(losses))
             _, img_size, _ = PHASES[cur_phase_idx]
-            print(f"step={step:6d}  loss={avg:.5f}  flow={float(flow_loss):.5f}"
-                  f"  lpips={float(lpips_loss):.5f}  lr={lr:.2e}  res={img_size}")
+            # Rate from this window only — survives phase transitions where
+            # step time changes with resolution. ETA recomputes each window.
+            now = time.monotonic()
+            window_dt = max(now - t_window, 1e-6)
+            sec_per_step = window_dt / max(step_window, 1)
+            remaining = max(args.steps - step, 0)
+            eta_sec = remaining * sec_per_step
+            elapsed_sec = now - t_start
+
+            def _fmt(s):
+                s = int(s)
+                h, s = divmod(s, 3600)
+                m, s = divmod(s, 60)
+                return f"{h}h{m:02d}m" if h else f"{m}m{s:02d}s"
+
+            t_window = now
+            step_window = 0
+
+            print(f"step={step:6d}/{args.steps}  loss={avg:.5f}  flow={float(flow_loss):.5f}"
+                  f"  lpips={float(lpips_loss):.5f}  lr={lr:.2e}  res={img_size}"
+                  f"  {1.0/sec_per_step:.2f}it/s  elapsed={_fmt(elapsed_sec)}  eta={_fmt(eta_sec)}")
             if wandb is not None:
                 wandb.log({"loss": avg, "flow_loss": float(flow_loss),
-                           "lpips_loss": float(lpips_loss), "lr": lr}, step=step)
+                           "lpips_loss": float(lpips_loss), "lr": lr,
+                           "throughput/it_per_s": 1.0 / sec_per_step,
+                           "throughput/eta_sec": eta_sec}, step=step)
 
         if step % args.checkpoint_every == 0:
             ckpt_path = outdir / f"model_step_{step:06d}.pt"
