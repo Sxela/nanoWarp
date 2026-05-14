@@ -532,11 +532,19 @@ def infer_nat1(ema_model, diffusion, args, device, step, outdir):
 
 
 def save_checkpoint(model, ema, flow_cfg, args, step, path):
+    # The UNet constructor takes architecture flags that this script hardcodes
+    # (rather than exposing via CLI). Save them explicitly so validate.py and
+    # downstream loaders don't have to infer them from state_dict shapes.
+    config = dict(vars(args))
+    config.setdefault("source_in_stem", True)
+    config.setdefault("no_source_encoder", True)   # use_source_encoder = not no_source_encoder
+    config.setdefault("upsample_type", "resize_conv")
+    config.setdefault("image_size", 512)            # construction-time size (model handles any input)
     torch.save({
         "step": step,
         "model": model.state_dict(),
         "ema_model": ema.model.state_dict(),
-        "config": vars(args),
+        "config": config,
         "flow": flow_cfg.__dict__,
     }, path)
 

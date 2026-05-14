@@ -56,21 +56,57 @@ def main():
 
     ckpt = torch.load(args.checkpoint, map_location=device)
     train_cfg = ckpt.get("config", {})
+    state_key = "ema_model" if args.use_ema and "ema_model" in ckpt else "model"
+    sd = ckpt[state_key]
     attn_res_str = train_cfg.get("attn_resolutions", "8")
     attn_res = tuple(int(x) for x in str(attn_res_str).split(",") if x.strip())
     color_space = train_cfg.get("color_space", "srgb")
+
+    # Architecture metadata: prefer the saved config, but fall back to
+    # detecting from state_dict shapes for older checkpoints (e.g. exp32+
+    # runs whose save_checkpoint() didn't include these fields).
+    if "source_in_stem" in train_cfg:
+        source_in_stem = train_cfg["source_in_stem"]
+    else:
+        in_ch = sd["in_conv.weight"].shape[1]
+        source_in_stem = (in_ch == 6)
+    if "no_source_encoder" in train_cfg:
+        use_source_encoder = not train_cfg["no_source_encoder"]
+    else:
+        use_source_encoder = any(k.startswith("source_encoder.") for k in sd.keys())
+    upsample_type = train_cfg.get("upsample_type", "resize_conv")
+
+    # image_size determines which attn modules get instantiated. For exp32+
+    # the model is built at 512 regardless of training resolution. Default
+    # for older single-resolution training scripts is the train image_size.
+    # Resolve by checking which attn{1..4} keys are actually in the state_dict
+    # — image_size must be the smallest value for which the present attn keys
+    # match the configured attn_resolutions.
+    if "image_size" in train_cfg:
+        image_size = int(train_cfg["image_size"])
+    else:
+        present = {i for i in range(1, 5) if f"attn{i}.norm.weight" in sd}
+        attn_set = set(attn_res)
+        candidates = [128, 256, 512, 1024]
+        image_size = next(
+            (sz for sz in candidates
+             if {i for i in range(1, 5) if (sz >> (i - 1)) in attn_set} == present),
+            train_cfg.get("image_size", 128),
+        )
+
+    print(f"[arch] source_in_stem={source_in_stem}  use_source_encoder={use_source_encoder}  "
+          f"image_size={image_size}  attn_res={attn_res}")
     model = Img2ImgDiffusionUNet(
         model_ch=train_cfg.get("model_ch", 64),
         pretrained_source_encoder=False,
-        source_in_stem=train_cfg.get("source_in_stem", False),
-        use_source_encoder=not train_cfg.get("no_source_encoder", False),
-        upsample_type=train_cfg.get("upsample_type", "resize_conv"),
+        source_in_stem=source_in_stem,
+        use_source_encoder=use_source_encoder,
+        upsample_type=upsample_type,
         attn_resolutions=attn_res,
-        image_size=train_cfg.get("image_size", 128),
+        image_size=image_size,
         color_space=color_space,
     ).to(device)
-    state_key = "ema_model" if args.use_ema and "ema_model" in ckpt else "model"
-    model.load_state_dict(ckpt[state_key])
+    model.load_state_dict(sd)
     model.eval()
 
     diffusion, method_cfg, method = build_method_from_ckpt(ckpt, device)
