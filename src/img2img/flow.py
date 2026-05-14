@@ -110,6 +110,8 @@ class RectifiedImageFlow:
         t_low: int = 0,
         t_high: int | None = None,
         source_dropout: float = 0.0,
+        contrastive_source_weight: float = 0.0,
+        contrastive_source_margin: float = 0.15,
     ):
         b = target.shape[0]
         t_low_c, t_high_c = self._t_range_continuous(t_low, t_high)
@@ -129,6 +131,15 @@ class RectifiedImageFlow:
         if aux_lpips is not None and aux_lpips_weight > 0:
             lpips_loss = aux_lpips(x_target_hat, target).mean()
             loss = loss + aux_lpips_weight * lpips_loss
+
+            # Contrastive: penalize predictions that stay too close to source.
+            # Margin form: only contributes when lpips(out, source) < margin —
+            # past the margin the term is zero, so we don't reward arbitrarily
+            # noisy outputs that happen to be far from source.
+            if contrastive_source_weight > 0:
+                lpips_source = aux_lpips(x_target_hat, source).mean()
+                contrastive = F.relu(contrastive_source_margin - lpips_source)
+                loss = loss + contrastive_source_weight * contrastive
 
         return loss, t_emb_in, x_t, noise, v_hat, x_target_hat, flow_loss.detach(), lpips_loss.detach()
 

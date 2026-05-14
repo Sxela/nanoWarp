@@ -372,6 +372,12 @@ def parse_args():
     # lpips
     p.add_argument("--lpips-weight", type=float, default=0.2)
     p.add_argument("--lpips-aux-net", default="vgg", choices=["squeeze", "vgg", "alex"])
+    p.add_argument("--contrastive-source-weight", type=float, default=0.0,
+                   help="Margin contrastive: penalize predictions too close to source. "
+                        "Loss += w * relu(margin - lpips(out, source)). 0 = off (default).")
+    p.add_argument("--contrastive-source-margin", type=float, default=0.15,
+                   help="Margin for the source-contrastive penalty. Below this lpips(out, source) "
+                        "is penalized; above it the term is zero.")
     # augmentation — shared geometry
     p.add_argument("--aug-scale-min", type=float, default=1.0,
                    help="Min random resize scale (1.0 = full image view)")
@@ -730,6 +736,8 @@ def main():
             loss, t, x_t, _noise, _model_out, x0_hat, flow_loss, lpips_loss = diffusion.training_loss(
                 model, source, target,
                 aux_lpips=aux_lpips, aux_lpips_weight=args.lpips_weight,
+                contrastive_source_weight=args.contrastive_source_weight,
+                contrastive_source_margin=args.contrastive_source_margin,
             )
 
         loss_val = float(loss.item())
