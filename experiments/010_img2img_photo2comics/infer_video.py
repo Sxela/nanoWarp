@@ -130,22 +130,70 @@ class TemporalAttnV1(nn.Module):
 # ---------------------------------------------------------------------------
 
 def _build_exp25(ckpt_path: str, device: torch.device) -> tuple:
+    """Build any single-frame (non-temporal) Img2ImgDiffusionUNet checkpoint.
+
+    Despite the name, this handles exp25 *and* anything trained via
+    train_exp32_prog512.py (exp33 / exp34 / exp35 / exp36) by inferring
+    architecture flags from the state_dict when ckpt["config"] doesn't carry
+    them explicitly (older exp33 checkpoints).
+    """
     ckpt = torch.load(ckpt_path, map_location=device)
     cfg = ckpt.get("config", {})
+    state_key = "ema_model" if "ema_model" in ckpt else "model"
+    sd = ckpt[state_key]
     attn_res = tuple(int(x) for x in str(cfg.get("attn_resolutions", "8")).split(",") if x.strip())
+
+    # Detect arch flags missing from config by inspecting the state_dict.
+    if "source_in_stem" in cfg:
+        source_in_stem = bool(cfg["source_in_stem"])
+    else:
+        source_in_stem = sd["in_conv.weight"].shape[1] == 6
+    if "no_source_encoder" in cfg:
+        use_source_encoder = not cfg["no_source_encoder"]
+    else:
+        use_source_encoder = any(k.startswith("source_encoder.") for k in sd.keys())
+    if "image_size" in cfg:
+        image_size = int(cfg["image_size"])
+    else:
+        present = {i for i in range(1, 5) if f"attn{i}.norm.weight" in sd}
+        attn_set = set(attn_res)
+        image_size = next(
+            (sz for sz in (128, 256, 512, 1024)
+             if {i for i in range(1, 5) if (sz >> (i - 1)) in attn_set} == present),
+            256,
+        )
+
+    # Detect new optional modules (exp34/35/36).
+    use_decoder_attn = any(k.startswith("attn_dec") for k in sd.keys())
+    use_source_pyramid = any(k.startswith("source_pyramid.") for k in sd.keys())
+    use_dit_bottleneck = any(k.startswith("dit_bottleneck.") for k in sd.keys())
+    num_dit_blocks = max(
+        (int(k.split(".")[2]) + 1 for k in sd.keys()
+         if k.startswith("dit_bottleneck.blocks.")),
+        default=4,
+    )
+
+    print(f"[build] source_in_stem={source_in_stem}  use_source_encoder={use_source_encoder}  "
+          f"image_size={image_size}  attn_res={attn_res}  "
+          f"decoder_attn={use_decoder_attn}  pyramid={use_source_pyramid}  "
+          f"dit={use_dit_bottleneck}({num_dit_blocks} blk)")
+
     model = Img2ImgDiffusionUNet(
         model_ch=cfg.get("model_ch", 88),
         pretrained_source_encoder=False,
-        source_in_stem=cfg.get("source_in_stem", False),
-        use_source_encoder=not cfg.get("no_source_encoder", False),
+        source_in_stem=source_in_stem,
+        use_source_encoder=use_source_encoder,
         upsample_type=cfg.get("upsample_type", "resize_conv"),
         attn_resolutions=attn_res,
-        image_size=256,
+        image_size=image_size,
         color_space=cfg.get("color_space", "srgb"),
         use_temporal=False,
+        use_decoder_attn=use_decoder_attn,
+        use_source_pyramid=use_source_pyramid,
+        use_dit_bottleneck=use_dit_bottleneck,
+        num_dit_blocks=num_dit_blocks,
     ).to(device).eval()
-    state_key = "ema_model" if "ema_model" in ckpt else "model"
-    model.load_state_dict(ckpt[state_key], strict=True)
+    model.load_state_dict(sd, strict=True)
     flow_cfg = FlowConfig(**(ckpt.get("flow") or ckpt.get("diffusion") or {}))
     return model, RectifiedImageFlow(flow_cfg, device)
 
@@ -463,7 +511,16 @@ def parse_args():
     p.add_argument("--end-frame",   type=int, default=90)
     p.add_argument("--image-size",  type=int, default=256)
     p.add_argument("--sample-steps", type=int, default=20)
-    p.add_argument("--exp25",  default="out/exp25_lpipsvgg_80k_from_exp23/model.pt")
+    # Single-frame model checkpoints. Path(s) — any checkpoint trained via
+    # train.py (exp25-era) or train_exp32_prog512.py (exp33+) works; arch is
+    # auto-detected from the state_dict in _build_exp25.
+    # `--single` accepts one or more paths and produces one MP4 per checkpoint
+    # (named after each checkpoint's parent dir). Legacy `--exp25` aliases.
+    p.add_argument("--exp25", "--single", dest="single_paths", nargs="+",
+                   default=None,
+                   help="One or more single-frame model checkpoints (.pt). "
+                        "Space-separate paths to run side-by-side. Each writes "
+                        "{outdir}/{name}.mp4 named from the checkpoint's parent dir.")
     p.add_argument("--exp27e", default=None, help="exp27e checkpoint (cross-chunk attn); skip if not provided")
     p.add_argument("--exp28c", default=None, help="exp28c checkpoint (WAN anchor); skip if not provided")
     p.add_argument("--exp29",  default=None, help="exp29/exp29b checkpoint (decoder LoRA + anchor reinjection)")
@@ -493,15 +550,21 @@ def main():
     # save source reference
     write_mp4(frames.cpu(), outdir / "source.mp4", fps)
 
-    # --- exp25 ---
-    print("running exp25 (single-frame)...")
-    m25, d25 = _build_exp25(args.exp25, device)
-    out25 = sample_frames_exp25(m25, d25, frames, args.sample_steps,
-                                fixed_seed=args.fixed_seed,
-                                noise_strength=args.noise_strength)
+    # --- single-frame model(s) (flag: --single, legacy --exp25) ---
+    # One MP4 per checkpoint, named after the parent dir's first underscore
+    # token (so out/exp33_aug32stack_.../exp33_model.pt → exp33.mp4).
+    single_paths = args.single_paths or ["out/exp25_lpipsvgg_80k_from_exp23/model.pt"]
     suffix = f"_seed{args.fixed_seed}_ns{args.noise_strength}" if args.fixed_seed is not None else ""
-    write_mp4(out25.cpu(), outdir / f"exp25{suffix}.mp4", fps)
-    del m25, d25
+    for ckpt_str in single_paths:
+        ckpt_path = Path(ckpt_str)
+        out_stem = ckpt_path.parent.name.split("_")[0] if ckpt_path.parent.name else ckpt_path.stem
+        print(f"running single-frame model from {ckpt_path} (output: {out_stem}.mp4)...")
+        m25, d25 = _build_exp25(ckpt_str, device)
+        out25 = sample_frames_exp25(m25, d25, frames, args.sample_steps,
+                                    fixed_seed=args.fixed_seed,
+                                    noise_strength=args.noise_strength)
+        write_mp4(out25.cpu(), outdir / f"{out_stem}{suffix}.mp4", fps)
+        del m25, d25
 
     # --- exp27e (optional) ---
     if args.exp27e:
