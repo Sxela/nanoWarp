@@ -436,13 +436,30 @@ def parse_args():
 # Val helpers
 # ---------------------------------------------------------------------------
 
+def _sample_from_source(ema_model, diffusion, source, sample_steps, device):
+    """Single Euler-ODE rollout. Helper to avoid duplicating the loop."""
+    ts = torch.linspace(0.0, 1.0, sample_steps + 1, device=device)
+    x = source.clone()
+    for j in range(sample_steps):
+        t_cur = ts[j].expand(source.shape[0])
+        v = ema_model(source, x, diffusion._scale_t(t_cur))
+        x = x + float(ts[j + 1] - ts[j]) * v
+    return x.clamp(0, 1)
+
+
 @torch.no_grad()
 def run_val(ema_model, diffusion, val_loader, args, device, step, outdir, wandb):
-    from src.img2img.metrics import ValidationMetrics
+    """Run val twice per batch: once on clean source, once on a deterministically
+    corrupted source (JPEG + small blur + resize). The corrupted-source LPIPS
+    is a proxy 'robustness' metric — corruption-trained runs should keep the
+    clean→corrupted gap small; clean-only runs (exp23/25) will show a big gap.
+    """
+    from src.img2img.metrics import ValidationMetrics, val_corrupt
     metrics_fn = ValidationMetrics(device)
 
     ema_model.eval()
-    lpips_vals, ssim_vals = [], []
+    lpips_clean, ssim_clean = [], []
+    lpips_corr,  ssim_corr  = [], []
 
     for i, batch in enumerate(val_loader):
         if i >= args.val_batches:
@@ -450,30 +467,52 @@ def run_val(ema_model, diffusion, val_loader, args, device, step, outdir, wandb)
         source = batch["source"].to(device)
         target = batch["target"].to(device)
 
-        ts = torch.linspace(0.0, 1.0, args.sample_steps + 1, device=device)
-        x = source.clone()
-        for j in range(args.sample_steps):
-            t_cur = ts[j].expand(source.shape[0])
-            v = ema_model(source, x, diffusion._scale_t(t_cur))
-            x = x + float(ts[j + 1] - ts[j]) * v
-        samples = x.clamp(0, 1)
+        # Clean source → output
+        samples_clean = _sample_from_source(ema_model, diffusion, source, args.sample_steps, device)
+        m_clean = metrics_fn.compute(samples_clean, target)
+        lpips_clean.append(m_clean["lpips_squeeze"])
+        ssim_clean.append(m_clean["ssim"])
 
-        m = metrics_fn.compute(samples, target)
-        lpips_vals.append(m["lpips_squeeze"])
-        ssim_vals.append(m["ssim"])
+        # Corrupted source → output (target is still the clean target — the
+        # task being measured is "given a degraded source, can we still
+        # reconstruct the clean target?")
+        source_corr = val_corrupt(source)
+        samples_corr = _sample_from_source(ema_model, diffusion, source_corr, args.sample_steps, device)
+        m_corr = metrics_fn.compute(samples_corr, target)
+        lpips_corr.append(m_corr["lpips_squeeze"])
+        ssim_corr.append(m_corr["ssim"])
 
-    mean_lpips = sum(lpips_vals) / len(lpips_vals)
-    mean_ssim  = sum(ssim_vals)  / len(ssim_vals)
-    print(f"[val] step={step}  lpips_sq={mean_lpips:.4f}  ssim={mean_ssim:.4f}")
+    mean_lpips_clean = sum(lpips_clean) / len(lpips_clean)
+    mean_ssim_clean  = sum(ssim_clean)  / len(ssim_clean)
+    mean_lpips_corr  = sum(lpips_corr)  / len(lpips_corr)
+    mean_ssim_corr   = sum(ssim_corr)   / len(ssim_corr)
+    delta_lpips = mean_lpips_corr - mean_lpips_clean
+    print(f"[val] step={step}  clean lpips_sq={mean_lpips_clean:.4f} ssim={mean_ssim_clean:.4f}  |  "
+          f"corrupted lpips_sq={mean_lpips_corr:.4f} ssim={mean_ssim_corr:.4f}  Δ={delta_lpips:+.4f}")
 
     fp = (args.exp_name + "_") if args.exp_name else ""
     with open(outdir / f"{fp}val_step{step:06d}.json", "w") as f:
-        json.dump({"step": step, "lpips_sq": mean_lpips, "ssim": mean_ssim}, f, indent=2)
+        json.dump({
+            "step": step,
+            "lpips_sq": mean_lpips_clean,         # keep legacy keys for tooling
+            "ssim": mean_ssim_clean,
+            "lpips_sq_clean": mean_lpips_clean,
+            "ssim_clean": mean_ssim_clean,
+            "lpips_sq_corrupted": mean_lpips_corr,
+            "ssim_corrupted": mean_ssim_corr,
+            "lpips_sq_delta": delta_lpips,
+        }, f, indent=2)
 
     if wandb is not None:
-        wandb.log({"val/lpips_sq": mean_lpips, "val/ssim": mean_ssim}, step=step)
+        wandb.log({
+            "val/lpips_sq": mean_lpips_clean,
+            "val/ssim": mean_ssim_clean,
+            "val/lpips_sq_corrupted": mean_lpips_corr,
+            "val/ssim_corrupted": mean_ssim_corr,
+            "val/lpips_sq_delta": delta_lpips,
+        }, step=step)
 
-    return mean_lpips
+    return mean_lpips_clean
 
 
 @torch.no_grad()

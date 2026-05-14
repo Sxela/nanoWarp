@@ -2242,7 +2242,8 @@ similar pattern. If present, follow-up with `--aug-scale-max 1.5`.
 
 ## exp34 — exp33 recipe + symmetric decoder spatial self-attention
 
-**Status: WIRED 2026-05-14** (ready to launch after exp33 settles)
+**Status: WIRED 2026-05-14** (decoder-attn on the full-aug recipe; pair with
+exp37 for the same architecture change on minimal aug)
 
 Clean A/B vs exp33 (same data, same aug, same compute budget) to isolate
 the contribution of putting `BottleneckAttention` on the decoder side at
@@ -2266,11 +2267,10 @@ on, the decoder attn modules are instantiated at exactly the same
 resolutions as the encoder attn — single `attn_resolutions` knob controls
 both.
 
-**Why test this first** (before pyramid): cheapest mechanism, single
-boolean flag, no new modules; just toggling the symmetric architecture.
-If decoder attn alone moves the needle, exp35 (pyramid) builds on top of it.
-
-**Recipe**: identical to exp33 except `--use-decoder-attn` is passed.
+**Recipe**: identical to exp33 except `--use-decoder-attn` is passed. Reads
+the architectural delta on top of the full corruption-robustness aug stack;
+exp37 below runs the same architecture change on the minimal-aug
+(exp23-like) recipe so the delta can be read without aug confound.
 
 ```bash
 WANDB_API_KEY=... bash scripts/run_exp34_decoder_attn_at_exp33_recipe.sh
@@ -2280,6 +2280,60 @@ Script: `scripts/run_exp34_decoder_attn_at_exp33_recipe.sh`
 Outdir: `out/exp34_decoder_attn_noenc_attn163264_bf16_mc88_256px_20k`
 
 Results: TBD.
+
+---
+
+## exp37 — exp23-equivalent recipe (minimal aug) + symmetric decoder attn
+
+**Status: WIRED 2026-05-14** (architecture A/B on a clean baseline + a third
+anchor for the corruption-Δ metric)
+
+Two goals in one run:
+1. **Architecture-only A/B against exp23 (lpips_vgg=0.234)**. exp34 stacks
+   decoder attn on the full exp32 aug stack — which exp33's result showed
+   costs ~0.07 lpips_vgg on clean before any architecture changes — so the
+   architecture delta is hard to read. exp37 stacks the same architecture
+   change on the proven low-aug exp23 baseline so the read is clean.
+2. **Corruption-Δ anchor for a clean-trained 20k checkpoint.** The original
+   exp25 checkpoint that would have filled this anchor was lost before the
+   Δ metric was wired. exp37 provides a fresh clean-trained 20k anchor to
+   compare against exp32's Δ=+0.064 (corruption-trained anchor).
+
+**Aug settings ≈ exp23** (exp32 script reproduces exp23-style behaviour when
+geometric/color aug is dialled to ~identity and corruption is fully skipped):
+- `--aug-scale-min 1.0 --aug-scale-max 1.2` (matches exp23's
+  `resize_scale=1.10` + `scale_jitter=0.10`)
+- `--aug-rotate-deg 0.0`, `--aug-perspective-prob 0.0`
+- `--aug-brightness 0 --aug-contrast 0 --aug-saturation 0` (no color jitter)
+- `--clean-prob 1.0` → degradation pipeline fully skipped
+- hflip stays at p=0.5 (matches exp23, no CLI knob)
+
+**Architecture delta**: identical to exp34 (`--use-decoder-attn` → adds
+`attn_dec3` at H/4=64 and `attn_dec4` at H/8=32, mirroring encoder attn3/4
+at the same resolutions).
+
+```bash
+WANDB_API_KEY=... bash scripts/run_exp37_decoder_attn_at_exp23_recipe.sh
+```
+
+Script: `scripts/run_exp37_decoder_attn_at_exp23_recipe.sh`
+Outdir: `out/exp37_decoder_attn_at_exp23_recipe_noenc_attn163264_bf16_mc88_256px_20k`
+
+**What to look for** in `out/val_exp37_final_256px/val_metrics.json`:
+- `mean_lpips_vgg_sampled` vs exp23's **0.234** — the decoder-attn delta on clean.
+  - < 0.234 → decoder attn helps; stack on future runs.
+  - ≈ 0.234 → neutral at this dataset size; capacity isn't the bottleneck.
+  - > 0.234 → hurts; not enough data to train the extra modules.
+- `delta_lpips_vgg` (corruption-val gap) — third anchor on the Δ axis next to
+  exp25 (Δ=+0.116, clean-trained, 20k) and exp32 (Δ=+0.064, corruption-trained,
+  20k). Same baseline aug as exp25 plus the architecture change.
+
+Results: TBD.
+
+**Independent of exp37, exp33c is still planned** as the robustness-recipe
+test: scale ∈ [1.0, 1.5] + milder corruption tail (`resize_min=0.5`,
+`blur_max=2.0`, `jpeg_min=40`). exp33c sweeps the aug-recipe axis; exp37
+sweeps the architecture axis. Both can run in either order.
 
 ---
 
@@ -2395,6 +2449,58 @@ right resolution" direction instead.
 
 ---
 
+## exp37 — exp23-equivalent recipe (minimal aug) + symmetric decoder attn
+
+**Status: WIRED 2026-05-14**
+
+Two goals in one run:
+
+1. **Architecture A/B on a clean baseline.** exp34 stacks symmetric decoder
+   attn on top of exp33's full aug stack (which itself regressed clean-val
+   from 0.234 → 0.308 lpips_vgg). exp37 puts the same architecture change
+   on top of an exp23-style minimal-aug recipe, isolating the attn delta
+   from the aug delta. If exp37 < exp23 (0.234) on clean lpips_vgg, the
+   symmetric attn is a real win regardless of aug recipe.
+2. **Clean-trained Δ-reference at 20k steps.** The lost exp25 step-20k
+   checkpoint motivated this — exp37 gives a fresh clean-trained 20k
+   snapshot with the new Δ metric measured from the very first val pass,
+   establishing where the "no corruption training" floor sits on the Δ
+   axis (expected ∼0.10–0.12 lpips_vgg, matching the prior exp25 result).
+
+**Aug settings** (reproducing exp23-style behaviour inside the
+`train_exp32_prog512.py` script):
+- `scale ∈ [1.0, 1.2]` (≈ exp23's `resize_scale=1.10` + jitter 0.10)
+- `rotate ±0°`, `perspective_prob=0`, all color jitter at 0
+- `clean_prob=1.0` → degradation pipeline fully skipped
+- `hflip_prob=0.5` (hardcoded default, matches exp23)
+
+**Architecture delta** vs exp23: `--use-decoder-attn` adds `attn_dec3`
+and `attn_dec4` (the two encoder-attn levels mirrored on the decoder
+side). +~3M params over the exp23 backbone.
+
+```bash
+WANDB_API_KEY=... bash scripts/run_exp37_decoder_attn_at_exp23_recipe.sh
+```
+
+Script: `scripts/run_exp37_decoder_attn_at_exp23_recipe.sh`
+Outdir: `out/exp37_decoder_attn_at_exp23_recipe_noenc_attn163264_bf16_mc88_256px_20k`
+
+Results: TBD.
+
+**Reading the result**:
+- exp37 clean lpips_vgg < 0.234 → symmetric decoder attn helps even at
+  minimal-aug; promote to default in future runs.
+- exp37 ≈ 0.234 → attn change is a wash; the apparent improvement from
+  decoder attn (when comparing exp34 vs exp33) would be aug-interaction,
+  not architecture.
+- exp37 > 0.234 → attn hurts at clean training; the encoder-only
+  attention pattern was already enough.
+- exp37 Δlpips_vgg ≈ 0.10–0.12 → clean-trained models always have a big
+  robustness gap regardless of attn pattern (confirms Δ is an
+  aug-recipe lever, not an architecture one).
+
+---
+
 ## Temporal / video experiments
 
 All temporal experiments (exp27 onwards) are documented in
@@ -2407,6 +2513,50 @@ All temporal experiments (exp27 onwards) are documented in
 validate.py now reports both `mean_lpips_squeeze_sampled` (continuity with
 exp01–15) and `mean_lpips_vgg_sampled` (out-of-loop honest check). 28% gap
 observed on exp08-noenc (0.163 sq vs 0.209 vgg). Always report both going forward.
+
+---
+
+## Corruption-robustness Δ-metric (2026-05-14)
+
+Both the in-loop val ([train_exp32_prog512.py](../experiments/010_img2img_photo2comics/train_exp32_prog512.py))
+and the final validation pass ([validate.py](../experiments/010_img2img_photo2comics/validate.py))
+now run a second sampling pass per val batch against a deterministically
+corrupted source, alongside the standard clean-source pass.
+
+**Corruption** ([src/img2img/metrics.py::val_corrupt](../src/img2img/metrics.py)):
+fixed mid-strength so numbers are comparable across runs/steps —
+`resize 0.5× then bilinear-up → JPEG q=60 roundtrip → Gaussian blur σ=1.0`.
+Roughly equivalent to a moderately-compressed web image. Strictly easier
+than the worst-case training corruption (which goes up to σ=3 / q=30 /
+resize 0.25× in exp32-style training).
+
+**New metrics in `val_metrics.json` and wandb**:
+- `mean_lpips_{squeeze,vgg}_corrupted` — same val data, corrupted source.
+- `delta_lpips_{squeeze,vgg}` — corrupted minus clean. Smaller = more robust.
+
+**Interpretation**: clean-trained models (exp23/exp25) show big Δ (∼0.10
+lpips_vgg) because corruption is OOD for them. Corruption-trained models
+(exp32+) show ∼0.05–0.07. The Δ distills "how much does this model fall
+apart when the input isn't pristine" into one number, retroactively
+backfillable by re-running validate.py on saved checkpoints.
+
+**Reference numbers** (each model at its step 20k checkpoint, val at 256px,
+EMA, 25 batches × bs=4, sample_steps=20):
+
+| run | aug stack | clean lpips_vgg | corrupt lpips_vgg | **Δ lpips_vgg** | clean lpips_sq | corrupt lpips_sq | Δ lpips_sq |
+|------|-----|------|------|------|------|------|------|
+| exp25 (step 20k) | scale=1.10 + hflip | **0.234** | 0.350 | **+0.116** | 0.128 | 0.215 | +0.088 |
+| exp32 (step 20k) | scale∈[1.0,2.5] + full corruption | 0.265 | **0.329** | **+0.064** | 0.142 | **0.185** | +0.043 |
+
+Crossover: on corrupted source, exp32 wins (0.329 vs 0.350 lpips_vgg);
+on clean source, exp25 wins (0.234 vs 0.265). The corruption-trained model
+trades ~13% clean-quality for ~46% smaller robustness Δ and outright wins
+when input isn't pristine — which is the regime real video frames live in.
+
+**Going forward**: every `run_exp*.sh` end-of-run validate.py call now
+emits both clean and corrupted numbers + Δ. The Δ should be reported
+alongside lpips_vgg in any A/B summary; if Δ is large, the clean-val
+number alone is misleading about real-world quality.
 
 ---
 

@@ -11,7 +11,7 @@ from src.img2img import IdentityPairedAugment, Img2ImgDiffusionUNet, PairedImage
 from src.img2img.colorspace import linear_to_srgb
 from src.img2img.diffusion import DiffusionConfig, GaussianImageDiffusion
 from src.img2img.flow import FlowConfig, RectifiedImageFlow
-from src.img2img.metrics import ValidationMetrics
+from src.img2img.metrics import ValidationMetrics, val_corrupt
 from src.img2img.render import save_progress_strip, save_val_panel
 from src.utils.config import apply_yaml_config
 
@@ -139,6 +139,12 @@ def main():
     ssim_vals = []
     lpips_vals = []
     lpips_vgg_vals = []
+    # Corruption-robustness pass: same val sources passed through
+    # val_corrupt() before sampling. Robustness ≈ how small the gap is
+    # between clean and corrupted lpips.
+    ssim_vals_corr = []
+    lpips_vals_corr = []
+    lpips_vgg_vals_corr = []
     panels_written = 0
     for batch_idx, batch in enumerate(dl):
         if batch_idx >= args.max_batches:
@@ -205,6 +211,23 @@ def main():
             lpips_vals.append(metric_vals["lpips_squeeze"])
             lpips_vgg_vals.append(metric_vals["lpips_vgg"])
 
+        # --- corruption-robustness pass on the same batch ---
+        source_corr = val_corrupt(source)
+        samples_corr, _ = diffusion.sample(
+            model,
+            source_corr,
+            image_size=args.image_size,
+            sample_steps=args.sample_steps,
+            log_every=None,
+        )
+        m_corr = metrics_fn.compute(to_display(samples_corr), to_display(target))
+        ssim_vals_corr.append(m_corr["ssim"])
+        lpips_vals_corr.append(m_corr["lpips_squeeze"])
+        lpips_vgg_vals_corr.append(m_corr["lpips_vgg"])
+
+    def _mean(xs):
+        return sum(xs) / max(len(xs), 1)
+
     metrics = {
         "checkpoint": args.checkpoint,
         "method": method,
@@ -212,11 +235,22 @@ def main():
         "sample_steps": args.sample_steps,
         "high_t_range": [high_t_min, high_t_max],
         "num_batches": len(losses),
-        "mean_loss": sum(losses) / max(len(losses), 1),
-        "mean_ssim_sampled": sum(ssim_vals) / max(len(ssim_vals), 1),
-        "mean_lpips_sampled": sum(lpips_vals) / max(len(lpips_vals), 1),  # squeeze, kept for exp01-15 continuity
-        "mean_lpips_squeeze_sampled": sum(lpips_vals) / max(len(lpips_vals), 1),
-        "mean_lpips_vgg_sampled": sum(lpips_vgg_vals) / max(len(lpips_vgg_vals), 1),
+        "mean_loss": _mean(losses),
+        # Clean-source metrics (primary; comparable to exp01-32 numbers)
+        "mean_ssim_sampled": _mean(ssim_vals),
+        "mean_lpips_sampled": _mean(lpips_vals),  # squeeze, kept for exp01-15 continuity
+        "mean_lpips_squeeze_sampled": _mean(lpips_vals),
+        "mean_lpips_vgg_sampled": _mean(lpips_vgg_vals),
+        # Corrupted-source metrics — proxy for real-video robustness.
+        # Same val pairs, source put through val_corrupt() before sampling.
+        "mean_ssim_corrupted": _mean(ssim_vals_corr),
+        "mean_lpips_squeeze_corrupted": _mean(lpips_vals_corr),
+        "mean_lpips_vgg_corrupted": _mean(lpips_vgg_vals_corr),
+        # Robustness deltas: smaller is more robust. exp23/25 (clean-only
+        # training) will show big positive deltas; exp33/33b should show
+        # smaller ones if the aug stack is paying off.
+        "delta_lpips_vgg": _mean(lpips_vgg_vals_corr) - _mean(lpips_vgg_vals),
+        "delta_lpips_squeeze": _mean(lpips_vals_corr) - _mean(lpips_vals),
         "train_config": train_cfg,
     }
     with open(outdir / "val_metrics.json", "w") as f:

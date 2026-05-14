@@ -1,8 +1,48 @@
 from __future__ import annotations
 
+import io
+
 import torch
+import torch.nn.functional as F
+import torchvision.transforms.functional as TF
+from PIL import Image
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+
+
+def val_corrupt(source: torch.Tensor, jpeg_q: int = 60,
+                blur_sigma: float = 1.0, resize_factor: float = 0.5) -> torch.Tensor:
+    """Deterministic mid-strength corruption of a source batch for the
+    robustness-val pass. Fixed strength → numbers are comparable across
+    training steps and runs.
+
+    Pipeline (matches the in-training degrade aug at moderate values):
+        1. Downsample → upsample (resize_factor, bilinear) — pixelation
+        2. JPEG roundtrip at quality `jpeg_q`
+        3. Gaussian blur σ=`blur_sigma`
+
+    Args:
+        source: (B, 3, H, W) float in [0, 1].
+    Returns:
+        Corrupted tensor on the same device/dtype.
+    """
+    B, _, H, W = source.shape
+    down = F.interpolate(source, scale_factor=resize_factor, mode="bilinear", align_corners=False)
+    up = F.interpolate(down, size=(H, W), mode="bilinear", align_corners=False)
+    out_list = []
+    for i in range(B):
+        img = TF.to_pil_image(up[i].clamp(0, 1).cpu())
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=jpeg_q)
+        buf.seek(0)
+        img = Image.open(buf).convert("RGB")
+        out_list.append(TF.to_tensor(img))
+    corrupted = torch.stack(out_list).to(source.device, dtype=source.dtype)
+    kernel = max(3, int(2 * round(2 * blur_sigma) + 1))
+    if kernel % 2 == 0:
+        kernel += 1
+    corrupted = TF.gaussian_blur(corrupted, kernel_size=kernel, sigma=[blur_sigma, blur_sigma])
+    return corrupted
 
 
 class ValidationMetrics:
