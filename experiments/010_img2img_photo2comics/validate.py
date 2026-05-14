@@ -100,8 +100,20 @@ def main():
             train_cfg.get("image_size", 128),
         )
 
+    # Detect optional architecture additions (exp34/35/36).
+    use_decoder_attn = any(k.startswith("attn_dec") for k in sd.keys())
+    use_source_pyramid = any(k.startswith("source_pyramid.") for k in sd.keys())
+    use_dit_bottleneck = any(k.startswith("dit_bottleneck.") for k in sd.keys())
+    num_dit_blocks = max(
+        (int(k.split(".")[2]) + 1 for k in sd.keys()
+         if k.startswith("dit_bottleneck.blocks.")),
+        default=4,
+    )
+
     print(f"[arch] source_in_stem={source_in_stem}  use_source_encoder={use_source_encoder}  "
-          f"image_size={image_size}  attn_res={attn_res}")
+          f"image_size={image_size}  attn_res={attn_res}  "
+          f"decoder_attn={use_decoder_attn}  pyramid={use_source_pyramid}  "
+          f"dit={use_dit_bottleneck}({num_dit_blocks} blk)")
     model = Img2ImgDiffusionUNet(
         model_ch=train_cfg.get("model_ch", 64),
         pretrained_source_encoder=False,
@@ -111,6 +123,10 @@ def main():
         attn_resolutions=attn_res,
         image_size=image_size,
         color_space=color_space,
+        use_decoder_attn=use_decoder_attn,
+        use_source_pyramid=use_source_pyramid,
+        use_dit_bottleneck=use_dit_bottleneck,
+        num_dit_blocks=num_dit_blocks,
     ).to(device)
     model.load_state_dict(sd)
     model.eval()
