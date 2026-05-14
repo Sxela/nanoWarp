@@ -140,10 +140,18 @@ class ValidationMetrics:
 
     @torch.no_grad()
     def compute(self, pred: torch.Tensor, target: torch.Tensor) -> dict[str, float]:
+        # Reset before each call so the stateful torchmetrics accumulators only
+        # see the current batch — not a running mean over the whole val loop.
+        # Also avoids calling lpips_squeeze twice (which doubled the sample count
+        # and returned the wrong mean for the "lpips" alias key).
+        self.ssim.reset()
+        self.lpips_squeeze.reset()
+        self.lpips_vgg.reset()
+        lpips_sq = float(self.lpips_squeeze(pred, target).mean().item())
         return {
             "ssim": float(self.ssim(pred, target).item()),
-            "lpips": float(self.lpips_squeeze(pred, target).mean().item()),  # alias for back-compat
-            "lpips_squeeze": float(self.lpips_squeeze(pred, target).mean().item()),
+            "lpips": lpips_sq,  # alias for back-compat
+            "lpips_squeeze": lpips_sq,
             "lpips_vgg": float(self.lpips_vgg(pred, target).mean().item()),
         }
 

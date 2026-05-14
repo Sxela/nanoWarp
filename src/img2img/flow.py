@@ -129,6 +129,13 @@ class RectifiedImageFlow:
         lpips_loss = torch.tensor(0.0, device=target.device)
         loss = flow_loss
         if aux_lpips is not None and aux_lpips_weight > 0:
+            # Reset before every call: LearnedPerceptualImagePatchSimilarity is a
+            # stateful torchmetrics Metric that accumulates sum_scores across calls.
+            # Without reset, sum_scores grows a grad_fn chain one node deeper each
+            # step (two nodes for exp38 which calls aux_lpips twice), making
+            # loss.backward() traverse an ever-longer graph → continuous throughput
+            # collapse over a 20k-step run. Reset keeps the chain depth constant at 1.
+            aux_lpips.reset()
             lpips_loss = aux_lpips(x_target_hat, target).mean()
             loss = loss + aux_lpips_weight * lpips_loss
 
@@ -137,6 +144,7 @@ class RectifiedImageFlow:
             # past the margin the term is zero, so we don't reward arbitrarily
             # noisy outputs that happen to be far from source.
             if contrastive_source_weight > 0:
+                aux_lpips.reset()
                 lpips_source = aux_lpips(x_target_hat, source).mean()
                 contrastive = F.relu(contrastive_source_margin - lpips_source)
                 loss = loss + contrastive_source_weight * contrastive
