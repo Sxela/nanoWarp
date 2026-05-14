@@ -430,6 +430,11 @@ def parse_args():
                    help="Short experiment tag prepended to every saved output filename "
                         "(e.g. 'exp33' → exp33_model.pt, exp33_panel_step_005000.png). "
                         "Default '' = no prefix.")
+    p.add_argument("--resume", default=None,
+                   help="Path to a previous checkpoint (*.pt). Loads model + EMA + step; "
+                        "training continues from step+1 with the same CLI recipe. "
+                        "Optimizer state isn't saved → Adam warmup re-acquires momentum "
+                        "over the first ~100 steps.")
     p.add_argument("--outdir", default="out/exp32_prog512")
     p.add_argument("--wandb", action="store_true")
     p.add_argument("--wandb-project", default="nanoWarp")
@@ -702,15 +707,27 @@ def main():
     best_lpips = float("inf")
     cur_phase_idx = -1
     train_iter = None
+    start_step = 1
+
+    # Optional resume: load model + EMA + step from a previous checkpoint.
+    # The cosine LR schedule reads `step` so the LR resumes at the right
+    # fraction of the run; optimizer state is intentionally fresh.
+    if args.resume:
+        rckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(rckpt["model"])
+        if "ema_model" in rckpt:
+            ema.model.load_state_dict(rckpt["ema_model"])
+        start_step = int(rckpt.get("step", 0)) + 1
+        print(f"[resume] loaded {args.resume} (step={start_step - 1}) → continuing from step {start_step}")
 
     print(f"phases: {PHASES}")
-    print(f"training 0→{args.steps} steps")
+    print(f"training {start_step - 1}→{args.steps} steps")
 
     t_start = time.monotonic()
     t_window = t_start
     step_window = 0
 
-    for step in range(1, args.steps + 1):
+    for step in range(start_step, args.steps + 1):
         # --- phase transition ---
         new_phase_idx = next(i for i, (end, _, _) in enumerate(PHASES) if step <= end)
         if new_phase_idx != cur_phase_idx:
