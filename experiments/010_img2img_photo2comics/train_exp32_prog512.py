@@ -378,6 +378,17 @@ def parse_args():
     p.add_argument("--contrastive-source-margin", type=float, default=0.15,
                    help="Margin for the source-contrastive penalty. Below this lpips(out, source) "
                         "is penalized; above it the term is zero.")
+    p.add_argument("--style-loss-weight", type=float, default=0.0,
+                   help="VGG Gram-matrix style loss weight. 0 = off (default). "
+                        "Rewards texture/style match independent of pixel alignment.")
+    p.add_argument("--content-loss-weight", type=float, default=0.0,
+                   help="VGG content (feature-L1) loss weight. 0 = off. Overlaps LPIPS-VGG; "
+                        "usually leave 0 and rely on --lpips-weight + --style-loss-weight.")
+    p.add_argument("--style-loss-layers", default="8,15,22",
+                   help="VGG16 layer indices for the style/content feature loss.")
+    p.add_argument("--source-dropout", type=float, default=0.0,
+                   help="Probability of zeroing the source during training (CFG-style). "
+                        "Enables CFG at inference. 0 = off (default).")
     # augmentation — shared geometry
     p.add_argument("--aug-scale-min", type=float, default=1.0,
                    help="Min random resize scale (1.0 = full image view)")
@@ -675,6 +686,20 @@ def main():
         p.requires_grad_(False)
     print(f"lpips_aux_net={args.lpips_aux_net} weight={args.lpips_weight}")
 
+    # Optional VGG style / content loss (Gram-matrix style transfer, Gatys/Johnson).
+    # Used to push outputs toward target *texture statistics* independent of
+    # pixel alignment — complements LPIPS which is pixel-aligned.
+    style_loss_fn = None
+    if args.style_loss_weight > 0 or args.content_loss_weight > 0:
+        from src.img2img.feature_loss import VGGFeatureLoss
+        layers = tuple(int(x) for x in args.style_loss_layers.split(",") if x.strip())
+        style_loss_fn = VGGFeatureLoss(
+            layers=layers,
+            content_weight=args.content_loss_weight,
+            style_weight=args.style_loss_weight,
+        ).to(device)
+        print(f"vgg_feature_loss  layers={layers}  content={args.content_loss_weight}  style={args.style_loss_weight}")
+
     amp_dtype = torch.bfloat16 if args.amp == "bf16" else None
     use_amp = amp_dtype is not None and device.type == "cuda"
     autocast_ctx = torch.autocast(device_type="cuda", dtype=amp_dtype) if use_amp else nullcontext()
@@ -755,7 +780,12 @@ def main():
                 aux_lpips=aux_lpips, aux_lpips_weight=args.lpips_weight,
                 contrastive_source_weight=args.contrastive_source_weight,
                 contrastive_source_margin=args.contrastive_source_margin,
+                source_dropout=args.source_dropout,
             )
+            # Optional VGG feature/style loss on the model's target prediction.
+            if style_loss_fn is not None:
+                vgg_terms = style_loss_fn(x0_hat.clamp(0, 1), target)
+                loss = loss + vgg_terms["total"]
 
         loss_val = float(loss.item())
         if not math.isfinite(loss_val):

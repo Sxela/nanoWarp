@@ -162,6 +162,7 @@ class RectifiedImageFlow:
         channels: int = 3,
         sample_steps: int | None = None,
         log_every: int | None = None,
+        cfg_scale: float = 1.0,
     ):
         """Euler integration from x=source at t=0 to x≈target at t=1.
 
@@ -177,11 +178,23 @@ class RectifiedImageFlow:
         ts = torch.linspace(0.0, 1.0, sample_steps + 1, device=self.device)
         frames: list[torch.Tensor] = []
 
+        # CFG: at cfg_scale != 1, also do an unconditioned pass (source=zeros,
+        # matching training-time source_dropout) and combine:
+        #   v = v_uncond + cfg_scale * (v_cond - v_uncond)
+        # cfg_scale=1 → conditioned only (default, no extra cost).
+        use_cfg = cfg_scale != 1.0
+        zero_source = torch.zeros_like(source) if use_cfg else None
+
         for i in range(sample_steps):
             t_cur = ts[i].expand(b)
             dt = float(ts[i + 1] - ts[i])
             t_emb_in = self._scale_t(t_cur)
-            v_hat = model(source, x, t_emb_in)
+            v_cond = model(source, x, t_emb_in)
+            if use_cfg:
+                v_uncond = model(zero_source, x, t_emb_in)
+                v_hat = v_uncond + cfg_scale * (v_cond - v_uncond)
+            else:
+                v_hat = v_cond
             x = x + dt * v_hat
             if log_every is not None and (i % log_every == 0 or i == 0 or i == sample_steps - 1):
                 frames.append(x.detach().clamp(0, 1).cpu())

@@ -46,6 +46,11 @@ def parse_args():
     p.add_argument("--outdir", default="out/img2img_v1_val")
     p.add_argument("--use-ema", action="store_true")
     p.add_argument("--sample-steps", type=int, default=50)
+    p.add_argument("--cfg-scale", type=float, default=1.0,
+                   help="Classifier-free guidance scale. 1.0 = no CFG (default; single "
+                        "forward per step). >1 → two forwards per step (conditioned + "
+                        "unconditioned), combined as v_u + s*(v_c - v_u). Requires the "
+                        "model to have been trained with --source-dropout > 0.")
     p.add_argument("--progress-every", type=int, default=10)
     p.add_argument("--high-t-min", type=int, default=800)
     p.add_argument("--high-t-max", type=int, default=999)
@@ -188,6 +193,7 @@ def main():
                 image_size=args.image_size,
                 sample_steps=args.sample_steps,
                 log_every=args.progress_every,
+                cfg_scale=args.cfg_scale,
             )
 
             if method == "flow":
@@ -231,6 +237,7 @@ def main():
                 image_size=args.image_size,
                 sample_steps=args.sample_steps,
                 log_every=None,
+                cfg_scale=args.cfg_scale,
             )
             metric_vals = metrics_fn.compute(to_display(samples), to_display(target))
             ssim_vals.append(metric_vals["ssim"])
@@ -245,6 +252,7 @@ def main():
             image_size=args.image_size,
             sample_steps=args.sample_steps,
             log_every=None,
+            cfg_scale=args.cfg_scale,
         )
         m_corr = metrics_fn.compute(to_display(samples_corr), to_display(target))
         ssim_vals_corr.append(m_corr["ssim"])
