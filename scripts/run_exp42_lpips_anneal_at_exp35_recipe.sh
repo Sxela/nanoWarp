@@ -43,6 +43,7 @@ python3 experiments/010_img2img_photo2comics/train_exp32_prog512.py \
     --aug-brightness 0.0 --aug-contrast 0.0 --aug-saturation 0.0 \
     --clean-prob 1.0 \
     --val-every 1000 --panel-every 1000 --checkpoint-every 5000 --best-every 1000 \
+    --panel-keys "000942,000943,000921" \
     --sample-steps 20 \
     --exp-name exp42 \
     --wandb \

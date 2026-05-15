@@ -454,6 +454,10 @@ def parse_args():
                         "256 runs that's 256, for full progressive 128→256→512 it's 512). "
                         "Set explicitly to pin val at a fixed res.")
     p.add_argument("--panel-every", type=int, default=5_000)
+    p.add_argument("--panel-keys", default="000942,000943,000921",
+                   help="Comma-separated val sample stems to pin into every panel "
+                        "snapshot. Default = three close-up faces from the val split. "
+                        "Empty string = first val batch (legacy behaviour).")
     p.add_argument("--checkpoint-every", type=int, default=10_000)
     p.add_argument("--best-every", type=int, default=5_000,
                    help="Evaluate at this interval and save model_best.pt if val LPIPS improves")
@@ -558,6 +562,24 @@ def run_val(ema_model, diffusion, val_loader, args, device, step, outdir, wandb)
     return mean_lpips_clean
 
 
+def build_panel_batch(val_pairs, panel_keys, image_size, device):
+    """Pre-build a fixed batch from specific val stems (e.g. close-up faces) so
+    every panel snapshot shows the same comparable samples across runs.
+    Returns None when panel_keys is empty or no matching stems are found.
+    """
+    keys = {k.strip() for k in panel_keys.split(",") if k.strip()}
+    if not keys:
+        return None
+    selected = [(s, t) for (s, t) in val_pairs if s.stem in keys]
+    if not selected:
+        return None
+    ds = ProgPairedDataset(selected, image_size=image_size, val=True)
+    sources = torch.stack([ds[i]["source"] for i in range(len(selected))]).to(device)
+    targets = torch.stack([ds[i]["target"] for i in range(len(selected))]).to(device)
+    return {"source": sources, "target": targets,
+            "stems": [s.stem for (s, _) in selected]}
+
+
 @torch.no_grad()
 def save_panel(ema_model, diffusion, val_loader, args, device, step, outdir):
     ema_model.eval()
@@ -576,6 +598,28 @@ def save_panel(ema_model, diffusion, val_loader, args, device, step, outdir):
     fp = (args.exp_name + "_") if args.exp_name else ""
     save_val_panel(source.cpu(), target.cpu(), samples.cpu(), samples.cpu(),
                    outdir / f"{fp}panel_step_{step:06d}.png")
+
+
+@torch.no_grad()
+def save_face_panel(ema_model, diffusion, panel_batch, args, step, outdir):
+    """Sample the pinned face-closeup batch and save to a separate filename."""
+    if panel_batch is None:
+        return
+    ema_model.eval()
+    source = panel_batch["source"]
+    target = panel_batch["target"]
+
+    ts = torch.linspace(0.0, 1.0, args.sample_steps + 1, device=source.device)
+    x = source.clone()
+    for j in range(args.sample_steps):
+        t_cur = ts[j].expand(source.shape[0])
+        v = ema_model(source, x, diffusion._scale_t(t_cur))
+        x = x + float(ts[j + 1] - ts[j]) * v
+    samples = x.clamp(0, 1)
+
+    fp = (args.exp_name + "_") if args.exp_name else ""
+    save_val_panel(source.cpu(), target.cpu(), samples.cpu(), samples.cpu(),
+                   outdir / f"{fp}face_panel_step_{step:06d}.png")
 
 
 @torch.no_grad()
@@ -745,6 +789,14 @@ def main():
     val_image_size = args.val_image_size if args.val_image_size > 0 else final_image_size
     val_bs = next(bs for end, _, bs in PHASES if args.steps <= end)
     val_loader = make_loader(val_pairs, val_image_size, val_bs, args, val=True)
+
+    # Pinned face-closeup panel batch (always the same val samples across
+    # steps and runs → directly comparable face crops).
+    face_panel_batch = build_panel_batch(val_pairs, args.panel_keys, val_image_size, device)
+    if face_panel_batch is not None:
+        print(f"[face_panel] pinned val stems: {face_panel_batch['stems']}")
+    else:
+        print(f"[face_panel] none — panel_keys='{args.panel_keys}' matched no val stems")
     print(f"[val] loader built at image_size={val_image_size}  bs={val_bs}  "
           f"(final-phase res; override with --val-image-size)")
 
@@ -884,6 +936,7 @@ def main():
 
         if step % args.panel_every == 0:
             save_panel(ema.model, diffusion, val_loader, args, device, step, outdir)
+            save_face_panel(ema.model, diffusion, face_panel_batch, args, step, outdir)
 
     # Final save
     fp = (args.exp_name + "_") if args.exp_name else ""
