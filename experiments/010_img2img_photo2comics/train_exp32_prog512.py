@@ -325,6 +325,22 @@ def cosine_lr(step, total_steps, warmup_steps, lr_max, lr_min):
     return lr_min + 0.5 * (lr_max - lr_min) * (1.0 + math.cos(math.pi * progress))
 
 
+def cosine_anneal(step: int, total_steps: int, start: float, end: float | None) -> float:
+    """Cosine interpolation start → end over total_steps. None end = constant start."""
+    if end is None or end == start:
+        return start
+    progress = min(step / max(total_steps, 1), 1.0)
+    return end + (start - end) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
+def cosine_anneal(step, total_steps, start, end):
+    """Cosine interp start → end over total_steps. If end is None, returns start."""
+    if end is None or end == start:
+        return start
+    progress = min(step / max(total_steps, 1), 1.0)
+    return end + (start - end) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
 def cycle(dl):
     while True:
         for batch in dl:
@@ -370,7 +386,12 @@ def parse_args():
     p.add_argument("--lr-warmup-steps", type=int, default=500)
     p.add_argument("--grad-clip-norm", type=float, default=1.0)
     # lpips
-    p.add_argument("--lpips-weight", type=float, default=0.2)
+    p.add_argument("--lpips-weight", type=float, default=0.2,
+                   help="LPIPS weight at step 0. If --lpips-weight-end is set, "
+                        "cosine-anneals to that value by args.steps.")
+    p.add_argument("--lpips-weight-end", type=float, default=None,
+                   help="Cosine-anneal LPIPS weight from --lpips-weight at step 0 to "
+                        "this value at args.steps. Default None = constant weight.")
     p.add_argument("--lpips-aux-net", default="vgg", choices=["squeeze", "vgg", "alex"])
     p.add_argument("--contrastive-source-weight", type=float, default=0.0,
                    help="Margin contrastive: penalize predictions too close to source. "
@@ -773,11 +794,14 @@ def main():
         source = batch["source"].to(device)
         target = batch["target"].to(device)
 
+        # Per-step LPIPS weight (cosine anneal if --lpips-weight-end set).
+        lpips_w = cosine_anneal(step, args.steps, args.lpips_weight, args.lpips_weight_end)
+
         optimizer.zero_grad(set_to_none=True)
         with autocast_ctx:
             loss, t, x_t, _noise, _model_out, x0_hat, flow_loss, lpips_loss = diffusion.training_loss(
                 model, source, target,
-                aux_lpips=aux_lpips, aux_lpips_weight=args.lpips_weight,
+                aux_lpips=aux_lpips, aux_lpips_weight=lpips_w,
                 contrastive_source_weight=args.contrastive_source_weight,
                 contrastive_source_margin=args.contrastive_source_margin,
                 source_dropout=args.source_dropout,
@@ -836,6 +860,7 @@ def main():
             if wandb is not None:
                 wandb.log({"loss": avg, "flow_loss": float(flow_loss),
                            "lpips_loss": float(lpips_loss), "lr": lr,
+                           "lpips_weight": lpips_w,
                            "throughput/it_per_s": 1.0 / sec_per_step,
                            "throughput/eta_sec": eta_sec}, step=step)
 
