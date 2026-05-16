@@ -441,6 +441,11 @@ def parse_args():
     p.add_argument("--lpips-weight-end", type=float, default=None,
                    help="Cosine-anneal LPIPS weight from --lpips-weight at step 0 to "
                         "this value at args.steps. Default None = constant weight.")
+    p.add_argument("--lpips-weight-warmup-steps", type=int, default=0,
+                   help="Linear LPIPS warmup: weight ramps from 0 to --lpips-weight over "
+                        "these steps, then either holds or continues the cosine anneal. "
+                        "Used to let pure flow-MSE establish spatial coherence before "
+                        "perceptual force kicks in. 0 = no warmup (default).")
     p.add_argument("--lpips-aux-net", default="vgg", choices=["squeeze", "vgg", "alex"])
     p.add_argument("--contrastive-source-weight", type=float, default=0.0,
                    help="Margin contrastive: penalize predictions too close to source. "
@@ -909,7 +914,11 @@ def main():
         target = batch["target"].to(device)
 
         # Per-step LPIPS weight (cosine anneal if --lpips-weight-end set).
-        lpips_w = cosine_anneal(step, args.steps, args.lpips_weight, args.lpips_weight_end)
+        if args.lpips_weight_warmup_steps > 0 and step < args.lpips_weight_warmup_steps:
+            # Linear ramp from 0 to args.lpips_weight over warmup_steps.
+            lpips_w = args.lpips_weight * (step / max(args.lpips_weight_warmup_steps, 1))
+        else:
+            lpips_w = cosine_anneal(step, args.steps, args.lpips_weight, args.lpips_weight_end)
 
         optimizer.zero_grad(set_to_none=True)
         with autocast_ctx:
