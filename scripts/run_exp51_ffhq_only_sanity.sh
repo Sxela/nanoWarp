@@ -56,7 +56,7 @@ python3 experiments/010_img2img_photo2comics/train_exp32_prog512.py \
     --outdir "$OUTDIR" \
     2>&1 | tee "$OUTDIR/train.log"
 
-echo "[exp51] training done. Validating on val_portraits..."
+echo "[exp51] training done. Validating on FFHQ val_portraits (in-distribution)..."
 
 python3 experiments/010_img2img_photo2comics/validate.py \
     data/photo2anime_ffhq2k \
@@ -67,7 +67,26 @@ python3 experiments/010_img2img_photo2comics/validate.py \
     --outdir "out/val_exp51_final_256px_val_portraits" \
     2>&1 | tee "out/val_exp51_final_256px_val_portraits.log"
 
-echo "[exp51] done. Compare on val_portraits:"
-echo "  exp25 (80k, 1k synth):           face_lpips_sq=0.169  face_ssim=0.500"
-echo "  exp35 (20k, 1k synth):           face_lpips_sq=0.178  face_ssim=0.477"
-echo "  exp51 (20k, 2.3k FFHQ-only):     <fresh — does pure FFHQ training beat mixed?>"
+echo "[exp51] cross-domain val on legacy photo2anime_1k val (out-of-distribution)..."
+
+# Validates the FFHQ-only-trained model on the original 100 group-photo val
+# pairs. Measures how badly FFHQ-only training overfits to centered portraits
+# vs handling small / off-center / peripheral faces in group photos.
+python3 experiments/010_img2img_photo2comics/validate.py \
+    data/photo2anime_1k \
+    --checkpoint "$OUTDIR/exp51_model.pt" \
+    --split val \
+    --image-size 256 --batch-size 4 --max-batches 25 --sample-steps 20 --use-ema \
+    --wandb-resume "$OUTDIR" --wandb-key-prefix final_val_legacy \
+    --outdir "out/val_exp51_final_256px_val_legacy" \
+    2>&1 | tee "out/val_exp51_final_256px_val_legacy.log"
+
+echo "[exp51] done. Compare:"
+echo "  exp25 (80k, 1k synth)        on val_portraits: face_lpips_sq=0.169  face_ssim=0.500"
+echo "  exp35 (20k, 1k synth)        on val_portraits: face_lpips_sq=0.178  face_ssim=0.477"
+echo "  exp50 (20k, 3k mixed)        on val_portraits: face_lpips_sq=0.124  face_ssim=0.544"
+echo "  exp51 (20k, 2.3k FFHQ-only)  on val_portraits: <fresh>"
+echo ""
+echo "  exp35 (20k, 1k synth)        on legacy val:    face_lpips_sq=0.153  face_ssim=0.728"
+echo "  exp50 (20k, 3k mixed)        on legacy val:    face_lpips_sq=0.201  face_ssim=0.605  (FFHQ-biased)"
+echo "  exp51 (20k, 2.3k FFHQ-only)  on legacy val:    <fresh — how badly does pure FFHQ regress?>"
