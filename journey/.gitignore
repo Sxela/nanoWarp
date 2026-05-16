@@ -1,0 +1,15 @@
+# Per-experiment artifacts are hardlinked from out/ and Downloads/ by
+# scripts/build_journey.py. The journey/ folder is for narrative content
+# (descriptions, run scripts, val metrics) that we want in git; the
+# heavyweight files stay outside.
+
+# Panels (large PNGs, easily reproducible from out/ or Downloads/).
+*/panels/
+*/face_panels/
+
+# Checkpoints (hundreds of MB each).
+*.pt
+*.ckpt
+
+# Per-run wandb dir if it leaks in.
+*/wandb/
