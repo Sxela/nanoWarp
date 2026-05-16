@@ -50,7 +50,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchvision.transforms.functional import InterpolationMode
 
-from src.img2img import EMA, Img2ImgDiffusionUNet
+from src.img2img import EMA, Img2ImgDiffusionUNet, PixelDiT
 from src.img2img.flow import FlowConfig, RectifiedImageFlow
 from src.img2img.render import save_val_panel
 from src.utils.config import apply_yaml_config
@@ -387,6 +387,16 @@ def parse_args():
     p.add_argument("--steps", type=int, default=100_000)
     p.add_argument("--model-ch", type=int, default=88)
     p.add_argument("--attn-resolutions", default="16,32,64")
+    p.add_argument("--arch", default="unet", choices=["unet", "pixel_dit"],
+                   help="Model architecture. 'unet' = Img2ImgDiffusionUNet (default); "
+                        "'pixel_dit' = pure-pixel DiT (HiDream-O1 style, no UNet). "
+                        "pixel_dit uses --dit-pixel-dim/--dit-pixel-layers/--dit-pixel-patch.")
+    p.add_argument("--dit-pixel-dim", type=int, default=384,
+                   help="Token width for pixel_dit (default 384 → ~49M params at 11 layers).")
+    p.add_argument("--dit-pixel-layers", type=int, default=11,
+                   help="Number of DiT blocks for pixel_dit (default 11 → ~49M total).")
+    p.add_argument("--dit-pixel-patch", type=int, default=16,
+                   help="Patch size for pixel_dit (default 16 → 256 tokens @ 256px, 1024 @ 512).")
     p.add_argument("--use-source-pyramid", action="store_true",
                    help="Enable in-model SourcePyramid + FiLM modulation of the decoder. "
                         "~2.4M extra params at mc=88. Zero-init FiLM → identity at init.")
@@ -755,24 +765,36 @@ def main():
 
     # --- model ---
     attn_res = tuple(int(x) for x in args.attn_resolutions.split(",") if x.strip())
-    model = Img2ImgDiffusionUNet(
-        model_ch=args.model_ch,
-        pretrained_source_encoder=False,
-        source_in_stem=True,
-        use_source_encoder=False,
-        upsample_type="resize_conv",
-        attn_resolutions=attn_res,
-        image_size=512,   # model built at 512; handles smaller inputs fine
-        use_source_pyramid=args.use_source_pyramid,
-        use_decoder_attn=args.use_decoder_attn,
-        use_dit_bottleneck=args.use_dit_bottleneck,
-        num_dit_blocks=args.num_dit_blocks,
-        dit_mlp_ratio=args.dit_mlp_ratio,
-    ).to(device)
+    if args.arch == "pixel_dit":
+        model = PixelDiT(
+            in_channels=3,
+            out_channels=3,
+            patch_size=args.dit_pixel_patch,
+            dim=args.dit_pixel_dim,
+            num_layers=args.dit_pixel_layers,
+            num_heads=max(1, args.dit_pixel_dim // 64),  # head_dim ≈ 64 for flash-attn
+            mlp_ratio=4.0,
+            source_in_stem=True,
+        ).to(device)
+    else:
+        model = Img2ImgDiffusionUNet(
+            model_ch=args.model_ch,
+            pretrained_source_encoder=False,
+            source_in_stem=True,
+            use_source_encoder=False,
+            upsample_type="resize_conv",
+            attn_resolutions=attn_res,
+            image_size=512,   # model built at 512; handles smaller inputs fine
+            use_source_pyramid=args.use_source_pyramid,
+            use_decoder_attn=args.use_decoder_attn,
+            use_dit_bottleneck=args.use_dit_bottleneck,
+            num_dit_blocks=args.num_dit_blocks,
+            dit_mlp_ratio=args.dit_mlp_ratio,
+        ).to(device)
 
     total = sum(p.numel() for p in model.parameters())
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"model mc={args.model_ch}  attn_res={attn_res}  params total={total:,}  trainable={trainable:,}")
+    print(f"arch={args.arch}  params total={total:,}  trainable={trainable:,}")
 
     ema = EMA(model, decay=args.ema_decay)
     optimizer = torch.optim.AdamW(

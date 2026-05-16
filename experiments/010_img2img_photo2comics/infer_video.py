@@ -143,6 +143,33 @@ def _build_exp25(ckpt_path: str, device: torch.device) -> tuple:
     sd = ckpt[state_key]
     attn_res = tuple(int(x) for x in str(cfg.get("attn_resolutions", "8")).split(",") if x.strip())
 
+    # Architecture dispatch: pixel_dit has `patch_embed.weight` at the root;
+    # UNet has `in_conv.weight`.
+    arch = cfg.get("arch")
+    if arch is None:
+        arch = "pixel_dit" if "patch_embed.weight" in sd else "unet"
+
+    if arch == "pixel_dit":
+        from src.img2img import PixelDiT
+        patch_w = sd["patch_embed.weight"]
+        dit_dim = int(patch_w.shape[0])
+        patch_size = int(patch_w.shape[-1])
+        num_layers = max(int(k.split(".")[1]) + 1
+                         for k in sd.keys() if k.startswith("blocks."))
+        print(f"[build] pixel_dit  dim={dit_dim}  layers={num_layers}  patch={patch_size}")
+        model = PixelDiT(
+            in_channels=3, out_channels=3,
+            patch_size=patch_size,
+            dim=dit_dim,
+            num_layers=num_layers,
+            num_heads=max(1, dit_dim // 64),
+            mlp_ratio=4.0,
+            source_in_stem=True,
+        ).to(device).eval()
+        model.load_state_dict(sd, strict=True)
+        flow_cfg = FlowConfig(**(ckpt.get("flow") or ckpt.get("diffusion") or {}))
+        return model, RectifiedImageFlow(flow_cfg, device)
+
     # Detect arch flags missing from config by inspecting the state_dict.
     if "source_in_stem" in cfg:
         source_in_stem = bool(cfg["source_in_stem"])

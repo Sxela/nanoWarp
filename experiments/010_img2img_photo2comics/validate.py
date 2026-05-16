@@ -7,7 +7,7 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
-from src.img2img import IdentityPairedAugment, Img2ImgDiffusionUNet, PairedImageDataset
+from src.img2img import IdentityPairedAugment, Img2ImgDiffusionUNet, PairedImageDataset, PixelDiT
 from src.img2img.colorspace import linear_to_srgb
 from src.img2img.diffusion import DiffusionConfig, GaussianImageDiffusion
 from src.img2img.flow import FlowConfig, RectifiedImageFlow
@@ -69,71 +69,93 @@ def main():
     train_cfg = ckpt.get("config", {})
     state_key = "ema_model" if args.use_ema and "ema_model" in ckpt else "model"
     sd = ckpt[state_key]
+
+    # Dispatch on architecture: prefer the saved config flag; fall back to
+    # state_dict signature (PixelDiT has `patch_embed.weight` at the root).
+    arch = train_cfg.get("arch")
+    if arch is None:
+        arch = "pixel_dit" if "patch_embed.weight" in sd else "unet"
+
+    if arch == "pixel_dit":
+        # Detect shapes from the state_dict so legacy checkpoints (without
+        # `dit_pixel_*` in config) still load.
+        patch_w = sd["patch_embed.weight"]  # (dim, in_ch, patch, patch)
+        dit_dim = int(patch_w.shape[0])
+        patch_size = int(patch_w.shape[-1])
+        num_layers = max(int(k.split(".")[1]) + 1
+                         for k in sd.keys() if k.startswith("blocks."))
+        print(f"[arch] pixel_dit  dim={dit_dim}  layers={num_layers}  patch={patch_size}")
+        model = PixelDiT(
+            in_channels=3, out_channels=3,
+            patch_size=patch_size,
+            dim=dit_dim,
+            num_layers=num_layers,
+            num_heads=max(1, dit_dim // 64),
+            mlp_ratio=4.0,
+            source_in_stem=True,
+        ).to(device)
+        model.load_state_dict(sd)
+        # diffusion/metrics built in the shared block below.
+        _arch_built = True
+    else:
+        _arch_built = False
     attn_res_str = train_cfg.get("attn_resolutions", "8")
     attn_res = tuple(int(x) for x in str(attn_res_str).split(",") if x.strip())
     color_space = train_cfg.get("color_space", "srgb")
 
-    # Architecture metadata: prefer the saved config, but fall back to
-    # detecting from state_dict shapes for older checkpoints (e.g. exp32+
-    # runs whose save_checkpoint() didn't include these fields).
-    if "source_in_stem" in train_cfg:
-        source_in_stem = train_cfg["source_in_stem"]
-    else:
-        in_ch = sd["in_conv.weight"].shape[1]
-        source_in_stem = (in_ch == 6)
-    if "no_source_encoder" in train_cfg:
-        use_source_encoder = not train_cfg["no_source_encoder"]
-    else:
-        use_source_encoder = any(k.startswith("source_encoder.") for k in sd.keys())
-    upsample_type = train_cfg.get("upsample_type", "resize_conv")
+    if not _arch_built:
+        # UNet branch: detect from saved config / fall back to state_dict shapes.
+        if "source_in_stem" in train_cfg:
+            source_in_stem = train_cfg["source_in_stem"]
+        else:
+            in_ch = sd["in_conv.weight"].shape[1]
+            source_in_stem = (in_ch == 6)
+        if "no_source_encoder" in train_cfg:
+            use_source_encoder = not train_cfg["no_source_encoder"]
+        else:
+            use_source_encoder = any(k.startswith("source_encoder.") for k in sd.keys())
+        upsample_type = train_cfg.get("upsample_type", "resize_conv")
 
-    # image_size determines which attn modules get instantiated. For exp32+
-    # the model is built at 512 regardless of training resolution. Default
-    # for older single-resolution training scripts is the train image_size.
-    # Resolve by checking which attn{1..4} keys are actually in the state_dict
-    # — image_size must be the smallest value for which the present attn keys
-    # match the configured attn_resolutions.
-    if "image_size" in train_cfg:
-        image_size = int(train_cfg["image_size"])
-    else:
-        present = {i for i in range(1, 5) if f"attn{i}.norm.weight" in sd}
-        attn_set = set(attn_res)
-        candidates = [128, 256, 512, 1024]
-        image_size = next(
-            (sz for sz in candidates
-             if {i for i in range(1, 5) if (sz >> (i - 1)) in attn_set} == present),
-            train_cfg.get("image_size", 128),
+        if "image_size" in train_cfg:
+            image_size = int(train_cfg["image_size"])
+        else:
+            present = {i for i in range(1, 5) if f"attn{i}.norm.weight" in sd}
+            attn_set = set(attn_res)
+            candidates = [128, 256, 512, 1024]
+            image_size = next(
+                (sz for sz in candidates
+                 if {i for i in range(1, 5) if (sz >> (i - 1)) in attn_set} == present),
+                train_cfg.get("image_size", 128),
+            )
+
+        use_decoder_attn = any(k.startswith("attn_dec") for k in sd.keys())
+        use_source_pyramid = any(k.startswith("source_pyramid.") for k in sd.keys())
+        use_dit_bottleneck = any(k.startswith("dit_bottleneck.") for k in sd.keys())
+        num_dit_blocks = max(
+            (int(k.split(".")[2]) + 1 for k in sd.keys()
+             if k.startswith("dit_bottleneck.blocks.")),
+            default=4,
         )
 
-    # Detect optional architecture additions (exp34/35/36).
-    use_decoder_attn = any(k.startswith("attn_dec") for k in sd.keys())
-    use_source_pyramid = any(k.startswith("source_pyramid.") for k in sd.keys())
-    use_dit_bottleneck = any(k.startswith("dit_bottleneck.") for k in sd.keys())
-    num_dit_blocks = max(
-        (int(k.split(".")[2]) + 1 for k in sd.keys()
-         if k.startswith("dit_bottleneck.blocks.")),
-        default=4,
-    )
-
-    print(f"[arch] source_in_stem={source_in_stem}  use_source_encoder={use_source_encoder}  "
-          f"image_size={image_size}  attn_res={attn_res}  "
-          f"decoder_attn={use_decoder_attn}  pyramid={use_source_pyramid}  "
-          f"dit={use_dit_bottleneck}({num_dit_blocks} blk)")
-    model = Img2ImgDiffusionUNet(
-        model_ch=train_cfg.get("model_ch", 64),
-        pretrained_source_encoder=False,
-        source_in_stem=source_in_stem,
-        use_source_encoder=use_source_encoder,
-        upsample_type=upsample_type,
-        attn_resolutions=attn_res,
-        image_size=image_size,
-        color_space=color_space,
-        use_decoder_attn=use_decoder_attn,
-        use_source_pyramid=use_source_pyramid,
-        use_dit_bottleneck=use_dit_bottleneck,
-        num_dit_blocks=num_dit_blocks,
-    ).to(device)
-    model.load_state_dict(sd)
+        print(f"[arch] unet  source_in_stem={source_in_stem}  use_source_encoder={use_source_encoder}  "
+              f"image_size={image_size}  attn_res={attn_res}  "
+              f"decoder_attn={use_decoder_attn}  pyramid={use_source_pyramid}  "
+              f"dit={use_dit_bottleneck}({num_dit_blocks} blk)")
+        model = Img2ImgDiffusionUNet(
+            model_ch=train_cfg.get("model_ch", 64),
+            pretrained_source_encoder=False,
+            source_in_stem=source_in_stem,
+            use_source_encoder=use_source_encoder,
+            upsample_type=upsample_type,
+            attn_resolutions=attn_res,
+            image_size=image_size,
+            color_space=color_space,
+            use_decoder_attn=use_decoder_attn,
+            use_source_pyramid=use_source_pyramid,
+            use_dit_bottleneck=use_dit_bottleneck,
+            num_dit_blocks=num_dit_blocks,
+        ).to(device)
+        model.load_state_dict(sd)
     model.eval()
 
     diffusion, method_cfg, method = build_method_from_ckpt(ckpt, device)
