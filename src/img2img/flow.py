@@ -174,7 +174,12 @@ class RectifiedImageFlow:
             sample_steps = 10
 
         b = source.shape[0]
+        # Match the training-time x_t distribution: at t=0 training samples are
+        # `source + sigma * noise`, so inference must start from the same.
+        # Negligible at sigma_noise=0.05 (legacy), important at larger σ.
         x = source.clone()
+        if self.config.sigma_noise > 0:
+            x = x + self.config.sigma_noise * torch.randn_like(x)
         ts = torch.linspace(0.0, 1.0, sample_steps + 1, device=self.device)
         frames: list[torch.Tensor] = []
 

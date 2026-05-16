@@ -318,10 +318,39 @@ def make_loader(pairs, image_size, batch_size, args, val=False):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def cosine_lr(step, total_steps, warmup_steps, lr_max, lr_min):
+def cosine_lr(step, total_steps, warmup_steps, lr_max, lr_min,
+              num_cycles: int = 1, cycle_mult: float = 1.0):
+    """Cosine schedule with optional SGDR-style warm restarts.
+
+    num_cycles=1 (default): single smooth cosine from lr_max → lr_min over the
+    post-warmup window — backward-compatible with the original schedule.
+
+    num_cycles>1: split the post-warmup window into N cycles; each cycle is a
+    full cosine descent from lr_max to lr_min before restarting. With
+    cycle_mult > 1.0 cycles grow geometrically (e.g. 1k → 2k → 4k → ...).
+    """
     if step < warmup_steps:
         return lr_max * step / max(warmup_steps, 1)
-    progress = (step - warmup_steps) / max(total_steps - warmup_steps, 1)
+    s = step - warmup_steps
+    T_total = max(total_steps - warmup_steps, 1)
+
+    if num_cycles <= 1:
+        progress = s / T_total
+        return lr_min + 0.5 * (lr_max - lr_min) * (1.0 + math.cos(math.pi * progress))
+
+    if cycle_mult == 1.0:
+        T0 = T_total / num_cycles
+    else:
+        # T0 * (cycle_mult^N - 1) / (cycle_mult - 1) = T_total → T0 = T_total*(m-1)/(m^N-1)
+        T0 = T_total * (cycle_mult - 1.0) / (cycle_mult ** num_cycles - 1.0)
+
+    cycle_start, cycle_len = 0.0, T0
+    for _ in range(num_cycles):
+        if s < cycle_start + cycle_len:
+            break
+        cycle_start += cycle_len
+        cycle_len *= cycle_mult
+    progress = (s - cycle_start) / max(cycle_len, 1)
     return lr_min + 0.5 * (lr_max - lr_min) * (1.0 + math.cos(math.pi * progress))
 
 
@@ -384,6 +413,16 @@ def parse_args():
     p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--lr-min", type=float, default=1e-6)
     p.add_argument("--lr-warmup-steps", type=int, default=500)
+    p.add_argument("--lr-num-cycles", type=int, default=1,
+                   help="Cosine cycles in the LR schedule. 1 = smooth single decay (default); "
+                        ">1 = SGDR-style warm restarts.")
+    p.add_argument("--lr-cycle-mult", type=float, default=1.0,
+                   help="Geometric cycle-length growth factor (T_mult). 1.0 = equal cycles; "
+                        ">1.0 = each cycle is `mult` times longer than the previous.")
+    p.add_argument("--flow-sigma-noise", type=float, default=0.05,
+                   help="Off-path Gaussian noise σ added to x_t during training. Higher σ = "
+                        "more stochasticity → less MSE-blur, but inference must also start "
+                        "from source+σ*noise to match the training distribution.")
     p.add_argument("--grad-clip-norm", type=float, default=1.0)
     # lpips
     p.add_argument("--lpips-weight", type=float, default=0.2,
@@ -740,7 +779,7 @@ def main():
         [p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=1e-4
     )
 
-    flow_cfg = FlowConfig(timesteps=1000, sigma_noise=0.05, method="flow")
+    flow_cfg = FlowConfig(timesteps=1000, sigma_noise=args.flow_sigma_noise, method="flow")
     diffusion = RectifiedImageFlow(flow_cfg, device)
     print(f"flow_cfg={flow_cfg.__dict__}")
 
@@ -838,7 +877,8 @@ def main():
                 wandb.log({"phase": cur_phase_idx + 1, "train_image_size": img_size}, step=step)
 
         model.train()
-        lr = cosine_lr(step, args.steps, args.lr_warmup_steps, args.lr, args.lr_min)
+        lr = cosine_lr(step, args.steps, args.lr_warmup_steps, args.lr, args.lr_min,
+                       num_cycles=args.lr_num_cycles, cycle_mult=args.lr_cycle_mult)
         for pg in optimizer.param_groups:
             pg["lr"] = lr
 

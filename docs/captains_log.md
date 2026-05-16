@@ -2484,55 +2484,245 @@ right resolution" direction instead.
 
 ---
 
-## exp37 — exp23-equivalent recipe (minimal aug) + symmetric decoder attn
+## Results summary (clean-val @ 256px EMA, 25 batches, all archs auto-detected, 2026-05-15)
 
-**Status: WIRED 2026-05-14**
+All single-frame runs at 20k steps unless noted. Best in each column **bold**.
+Δ = corruption-val gap (smaller = more robust to degraded inputs).
 
-Two goals in one run:
+| run | aug | arch + loss tweaks | params | lpips_sq | lpips_vgg | ssim | face_lpips_sq | face_lpips_vgg | face_ssim | Δ lpips_vgg |
+|---|---|---|---|---|---|---|---|---|---|---|
+| exp23 | minimal (scale=1.10) | base | 49M | 0.127 | **0.234** | 0.689 | — | — | — | — |
+| exp25 (20k) | minimal | base | 49M | 0.128 | **0.234** | 0.688 | 0.157 | 0.289 | 0.728 | +0.116 |
+| exp25 (80k) | minimal | base | 49M | **0.115** | 0.217 | 0.712 | — | — | — | — |
+| exp32 (20k) | full corruption + scale 2.5 | base | 49M | 0.142 | 0.265 | 0.672 | 0.173 | 0.316 | 0.718 | +0.064 |
+| exp32 (100k) @ 256 | full corruption | base | 49M | 0.178 | 0.321 | 0.638 | 0.209 | 0.364 | 0.698 | +0.058 |
+| exp32 (100k) @ 512 | full corruption | base | 49M | 0.154 | 0.300 | 0.629 | 0.186 | 0.345 | 0.674 | **+0.040** |
+| exp33 | full aug stack | base | 49M | 0.168 | 0.308 | 0.639 | — | — | — | — |
+| exp33b | scale=1.5 + full corrupt | base | 49M | 0.148 | 0.274 | 0.659 | — | — | — | — |
+| exp37 | minimal | + decoder attn | 51M | 0.126 | 0.242 | 0.684 | 0.156 | 0.289 | 0.724 | +0.133 |
+| **exp35** | minimal | + dec_attn + pyramid | 51M | 0.124 | 0.240 | 0.689 | **0.153** | **0.286** | 0.728 | +0.133 |
+| exp36 | minimal | + dec_attn + pyramid + DiT(4 blk) | **79M** | 0.123 | 0.238 | 0.685 | 0.154 | 0.288 | 0.726 | +0.130 |
+| exp38 | minimal | exp35 + contrastive w=0.1 | 51M | 0.124 | 0.239 | 0.686 | 0.154 | 0.288 | 0.727 | +0.132 |
+| exp39 | minimal | exp35 + contrastive w=0.3 | 51M | 0.124 | **0.238** | 0.687 | 0.155 | 0.288 | 0.726 | +0.126 |
+| exp40 | minimal | exp35 + VGG Gram (w=5000) | 51M | 0.144 | 0.284 | 0.624 | 0.180 | 0.343 | 0.670 | +0.150 |
+| exp41 cfg=1.0 | minimal | exp35 + source_dropout=0.1 | 51M | 0.128 | 0.244 | 0.683 | 0.158 | 0.293 | 0.721 | +0.133 |
+| exp41 cfg=2.0 | minimal | (same ckpt, CFG inference) | 51M | 0.290 | 0.419 | 0.363 | 0.331 | 0.485 | 0.457 | +0.119 |
+| exp42 | minimal | exp35 + LPIPS anneal 0.2→0 | 51M | 0.129 | 0.229 | **0.700** | 0.161 | 0.289 | **0.744** | +0.159 |
 
-1. **Architecture A/B on a clean baseline.** exp34 stacks symmetric decoder
-   attn on top of exp33's full aug stack (which itself regressed clean-val
-   from 0.234 → 0.308 lpips_vgg). exp37 puts the same architecture change
-   on top of an exp23-style minimal-aug recipe, isolating the attn delta
-   from the aug delta. If exp37 < exp23 (0.234) on clean lpips_vgg, the
-   symmetric attn is a real win regardless of aug recipe.
-2. **Clean-trained Δ-reference at 20k steps.** The lost exp25 step-20k
-   checkpoint motivated this — exp37 gives a fresh clean-trained 20k
-   snapshot with the new Δ metric measured from the very first val pass,
-   establishing where the "no corruption training" floor sits on the Δ
-   axis (expected ∼0.10–0.12 lpips_vgg, matching the prior exp25 result).
+**Visual eye-test winner**: **exp35** (constant LPIPS=0.2, decoder attn + pyramid). exp42 has the best metrics but produces visibly blurrier outputs — the LPIPS anneal removed the perceptual push, so MSE converged to a pixel-aligned centroid (sharp on metrics, smooth on eyes).
 
-**Aug settings** (reproducing exp23-style behaviour inside the
-`train_exp32_prog512.py` script):
-- `scale ∈ [1.0, 1.2]` (≈ exp23's `resize_scale=1.10` + jitter 0.10)
-- `rotate ±0°`, `perspective_prob=0`, all color jitter at 0
-- `clean_prob=1.0` → degradation pipeline fully skipped
-- `hflip_prob=0.5` (hardcoded default, matches exp23)
+**Robustness winner**: **exp32-100k @ 512** (Δ=0.040). 75k steps at 512 with full corruption aug.
 
-**Architecture delta** vs exp23: `--use-decoder-attn` adds `attn_dec3`
-and `attn_dec4` (the two encoder-attn levels mirrored on the decoder
-side). +~3M params over the exp23 backbone.
+**Methodology notes added 2026-05-14/15**: corruption-Δ metric, face-region metrics via OpenCV Haar cascade (43 faces detected at 256px over 100 val pairs; 110 at 512px), pinned `--panel-keys 000942,000943,000921` close-up face panels saved alongside legacy first-batch panels, post-hoc panel tool at `scripts/face_panels.py`. Stateful torchmetrics LPIPS accumulator bug fixed in flow.py (was causing 10× training slowdown over 20k steps).
 
-```bash
-WANDB_API_KEY=... bash scripts/run_exp37_decoder_attn_at_exp23_recipe.sh
-```
+**Architectural ceiling at 1k pairs**: decoder attn, pyramid, DiT each add at best 0.001–0.005 lpips_vgg over the previous best. The dataset is saturated for these mid-sized arch changes; the next 0.01+ improvements have to come from data scale, training length, or fundamentally different recipes (e.g. high-σ flow, see exp43).
 
-Script: `scripts/run_exp37_decoder_attn_at_exp23_recipe.sh`
-Outdir: `out/exp37_decoder_attn_at_exp23_recipe_noenc_attn163264_bf16_mc88_256px_20k`
+---
 
-Results: TBD.
+## exp33b — exp33 recipe with scale capped at 1.5
 
-**Reading the result**:
-- exp37 clean lpips_vgg < 0.234 → symmetric decoder attn helps even at
-  minimal-aug; promote to default in future runs.
-- exp37 ≈ 0.234 → attn change is a wash; the apparent improvement from
-  decoder attn (when comparing exp34 vs exp33) would be aug-interaction,
-  not architecture.
-- exp37 > 0.234 → attn hurts at clean training; the encoder-only
-  attention pattern was already enough.
-- exp37 Δlpips_vgg ≈ 0.10–0.12 → clean-trained models always have a big
-  robustness gap regardless of attn pattern (confirms Δ is an
-  aug-recipe lever, not an architecture one).
+**Status: DONE 2026-05-14**
+
+Tests whether scale crop variance is the dominant cost of exp33's regression
+vs exp23. Result: yes — `scale=[1.0, 1.5]` recovered ~50% of the gap
+(lpips_vgg 0.308 → 0.274 vs exp23's 0.234). The rest of the aug stack
+(rotate/perspective/color/blur/JPEG) costs maybe 0.04 lpips_vgg combined,
+not 0.07.
+
+---
+
+## exp33c — exp33b with realistic-envelope corruption tail
+
+**Status: WIRED 2026-05-14** (not yet run)
+
+Hypothesis: exp33b's residual clean-val regression is the rare extreme tail
+of the corruption distribution training on inputs that don't occur in real
+footage. Dialled back: `degrade-resize-min 0.25 → 0.5`, `corrupt-blur-max
+3.0 → 2.0`, `corrupt-jpeg-min 30 → 40`. Resize prob stays at 0.3.
+
+Goal: clean lpips_vgg closer to exp23's 0.234 than exp33b's 0.274, with
+corruption-val Δ still meaningfully below exp25's +0.116.
+
+---
+
+## exp38/39 — exp35 + source-contrastive loss
+
+**Status: DONE 2026-05-15**
+
+Margin-form contrastive: `loss += w * relu(margin − lpips(out, source))`.
+Only contributes when output is too close to source; zero past the margin.
+
+- exp38 (w=0.1, m=0.15): neutral on every metric vs exp35.
+- exp39 (w=0.3, m=0.25): slight whole-image lpips_vgg improvement (0.240 →
+  0.238), slight face regression (~1–2%), modest robustness gain
+  (Δ 0.133 → 0.126). Pushed model marginally away from source-copy
+  behaviour. Not a clear win.
+
+---
+
+## exp40 — exp35 + VGG Gram style loss
+
+**Status: DONE 2026-05-15** (failed)
+
+Gatys/Johnson style loss at fastai-default `style_weight=5000` dominates the
+gradient signal (mean_loss = 0.037 vs typical 0.006 — 6× larger). Result:
+~16–20% regression across **every** metric, faces especially. fastai's
+5000 is tuned for pure neural style transfer with no flow loss; combined
+with our MSE + LPIPS recipe it's way too aggressive. Would need
+`style_weight ≈ 100–500` or an anneal schedule to be usable.
+
+---
+
+## exp41 — exp35 + classifier-free guidance
+
+**Status: DONE 2026-05-15** (failed at every CFG scale tested)
+
+Trained with `--source-dropout 0.1`. Validate.py extended with `--cfg-scale`
+that does two forwards per ODE step and combines: `v = v_u + s*(v_c − v_u)`.
+
+CFG-scale sweep on the same checkpoint:
+
+| cfg | lpips_vgg | face_lpips_vgg | face_ssim |
+|---|---|---|---|
+| 1.0 (no CFG) | 0.244 | 0.293 | 0.721 |
+| 1.1 | 0.246 | 0.297 | **0.722** |
+| 1.2 | 0.253 | 0.304 | 0.715 |
+| 1.3 | 0.262 | 0.316 | 0.702 |
+| 1.5 | 0.291 | 0.354 | 0.656 |
+| 2.0 | **0.419** | 0.485 | 0.457 (garbage) |
+
+Monotonic degradation past cfg=1.0. Root cause analysis: in flow matching,
+`v` is a true velocity (target − source per unit time). CFG amplification
+literally makes each ODE step `s×` too big → integrator overshoots the
+target manifold. Diffusion CFG of 2–7 doesn't translate to FM directly.
+Source-in-stem also makes guidance redundant — source conditioning is so
+dense at every level there's no useful "amplify in this direction".
+
+Lesson: CFG is the wrong tool for tight pixel-aligned img2img with strong
+source conditioning. Don't repeat.
+
+---
+
+## exp42 — exp35 + LPIPS weight cosine-annealed 0.2 → 0.0
+
+**Status: DONE 2026-05-15** (metrics win, visual loss)
+
+Hypothesis (incorrect, as it turned out): LPIPS-VGG's L2-in-feature-space
+incentivises mode-averaging — the model converges toward a feature
+centroid of plausible targets rather than committing to specific stylistic
+patterns. Anneal to zero by end → keep LPIPS nudge early, let MSE sharpen
+specifics late.
+
+Result on metrics:
+- **Best ssim yet** (0.700, first >0.69 crossing)
+- **Best face_ssim** (0.744 vs exp35's 0.728)
+- Best whole-image `lpips_vgg` (0.229 vs exp35's 0.240)
+- mean_loss dropped 4× by end (mostly via flow_loss converging better when
+  LPIPS isn't fighting it)
+
+Result visually: **blurrier than exp35**, not sharper. The pixel-MSE
+centroid IS the smooth output — that's what MSE rewards in pixel space
+with deterministic `v_target = target − source`. LPIPS was actually pushing
+*away* from pixel-MSE centroid into perceptually-sharper specifics, not
+toward feature centroid.
+
+Why FLUX/SD3 don't have this problem: they predict in **latent space**
+with a sharp VAE decoder, *and* their `x_t` has stochastic noise so the
+training target is a *distribution* not a deterministic map. Our setup
+(pixel space + paired data + tiny `σ_noise=0.05`) is the worst case for
+MSE blur. See exp43 below.
+
+---
+
+## exp43 — exp35 + flow σ_noise bumped from 0.05 → 0.30
+
+**Status: DONE 2026-05-15** (catastrophic failure)
+
+σ=0.30 was way too aggressive. Every metric collapsed: ssim 0.689 → **0.134**,
+lpips_sq 0.124 → **0.514**, face_ssim 0.728 → 0.209. Visually: grid
+artifacts, oversaturation, high-pass-filter appearance.
+
+Root cause: with σ=0.30 ambient noise at the inference start, the per-step
+ODE displacement (~0.05 per `dt=1/20`) is **6× smaller than the noise
+floor**. The integrator chases noise patterns instead of denoising →
+grid-like garbage.
+
+Lesson: σ_noise needs to be balanced against `dt = 1/sample_steps`. At 20
+steps, σ must be ≪ 0.05 or much more sample-steps are needed. σ at the
+0.05–0.10 range may still be worth a test, but σ=0.30 is far past the
+useful band.
+
+---
+
+## exp44 — 100k progressive + mid aug + exp35 arch + LPIPS anneal
+
+**Status: DONE 2026-05-16** (data ceiling reached at 1k pairs)
+
+Combined the best-known levers into one long run:
+- 100k progressive 128→256→512 (exp32 schedule, ~75k at 512)
+- Mid-strength aug (exp33c envelope: scale 1.5, blur ≤ 2.0, jpeg ≥ 40)
+- exp35 arch (decoder attn + source pyramid + FiLM)
+- LPIPS cosine-anneal 0.2 → 0.0
+
+Final val (@ 256, 25 batches, EMA, sample_steps=20):
+
+| metric | exp44 | exp35 (20k) |
+|---|---|---|
+| lpips_sq | 0.123 | 0.124 |
+| lpips_vgg | 0.238 | 0.240 |
+| ssim | 0.685 | 0.689 |
+| face_lpips_sq | 0.154 | **0.153** |
+| face_lpips_vgg | 0.288 | **0.286** |
+| face_ssim | 0.726 | **0.728** |
+
+**5× compute on the same 1k dataset got essentially exp35's result.** The
+architecture/training-recipe axis is saturated at 1k pairs — face metrics
+all within noise floor of exp35.
+
+**In-loop val/lpips_sq curve shows a U-shape**: bottoms around step 60k
+(lpips_weight ≈ 0.07) at val/lpips_sq=0.140, then climbs back to ~0.18 as
+the LPIPS weight approaches 0. `model_best.pt` is from near the bottom of
+the U — that's the right checkpoint to deploy from this run, not the
+final one. The 25-batch full-val measures higher than the in-loop val
+because val_batches=8 during training has higher variance.
+
+Implication: **annealing LPIPS all the way to 0 is too aggressive**. A
+floor at ~0.05–0.10 should retain the perceptual force that prevents
+late-training MSE blur. → exp45.
+
+---
+
+## exp45 — exp35 + LPIPS anneal 0.2 → 0.1 (with floor)
+
+**Status: WIRED 2026-05-16**
+
+Same recipe as exp42 (20k single-phase, minimal aug, exp35 arch) except
+the LPIPS anneal stops at 0.1 instead of going to 0. Targets the bottom
+of exp44's U-curve as a steady-state weight.
+
+If exp45 beats exp35 on faces with similar or lower whole-image LPIPS,
+the floor is the right pattern going forward. If not, exp35's constant
+0.2 stays canonical and we move on to **data scale-up** (FFHQ → Flux
+pairs) as the next leverage axis.
+
+---
+
+## Data scale-up (2026-05-16)
+
+Downloaded 2.5k FFHQ at 1024px to `data/source_pool/ffhq/` (3.3GB). Plan:
+generate Flux-edit pairs with the same prompt that produced the existing
+1k set, expand training data to ~3.5k pairs total → ~3.5× of current.
+Highest-leverage next move now that architecture is data-saturated.
+
+Used `merkol/ffhq-256` as smoke-test (worked at 256² but too small for
+Flux input quality), then `pravsels/FFHQ_1024` for the real 1024² pull.
+HF streaming dropped at ~50% (~4 hours) on Windows; script is resumable
+via skip-if-exists. 2.5k is enough to validate the data-scale hypothesis;
+extending to 5k later is straightforward.
+
+Unsplash Lite download URLs are stale (2025 redistribution change);
+data-portal requires terms acceptance. Skipped for now — FFHQ alone is
+the right starting point for the face-quality pain point.
 
 ---
 
