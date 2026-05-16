@@ -55,6 +55,13 @@ def parse_args():
     p.add_argument("--high-t-min", type=int, default=800)
     p.add_argument("--high-t-max", type=int, default=999)
     p.add_argument("--save-progress-strip", action="store_true")
+    p.add_argument("--wandb-resume", default=None,
+                   help="Path to a training outdir or to a wandb_run.txt file. "
+                        "If set, validate.py resumes that wandb run and logs the "
+                        "final-val metrics under final_val/* so the numbers survive "
+                        "post-training Colab death.")
+    p.add_argument("--wandb-key-prefix", default="final_val",
+                   help="Key prefix used when logging final-val metrics to wandb.")
     return p.parse_args()
 
 
@@ -333,6 +340,36 @@ def main():
     with open(outdir / "val_metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
     print(json.dumps(metrics, indent=2))
+
+    # Optionally resume the training wandb run and append final-val metrics.
+    if args.wandb_resume:
+        _log_final_val_to_wandb(metrics, args.wandb_resume, args.wandb_key_prefix, args.image_size)
+
+
+def _log_final_val_to_wandb(metrics: dict, resume_path: str, prefix: str, image_size: int):
+    """Resume a wandb run from a saved wandb_run.txt and log scalar metrics."""
+    from pathlib import Path
+    p = Path(resume_path)
+    run_file = p / "wandb_run.txt" if p.is_dir() else p
+    if not run_file.exists():
+        print(f"[wandb] resume file not found: {run_file}")
+        return
+    try:
+        project, run_id = [ln.strip() for ln in run_file.read_text(encoding="utf-8").splitlines() if ln.strip()][:2]
+    except Exception as e:
+        print(f"[wandb] failed to parse {run_file}: {e}")
+        return
+    try:
+        import wandb
+        wandb.init(project=project, id=run_id, resume="allow")
+        # Strip non-scalar fields before logging.
+        scalars = {f"{prefix}/{k}@{image_size}": v for k, v in metrics.items()
+                   if isinstance(v, (int, float)) and v is not None}
+        wandb.log(scalars)
+        wandb.finish()
+        print(f"[wandb] appended {len(scalars)} final-val scalars to run {run_id}")
+    except Exception as e:
+        print(f"[wandb] resume failed: {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":

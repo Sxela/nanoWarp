@@ -757,6 +757,12 @@ def main():
                         config=vars(args), dir=str(outdir))
             wandb = _wandb
             print(f"wandb run: {wandb.run.name}  ({wandb.run.url})")
+            # Save run id + project so validate.py can resume into the same
+            # run and append final-val metrics — useful if Colab dies after
+            # training but before the final-val finishes writing stdout.
+            (outdir / "wandb_run.txt").write_text(
+                f"{wandb.run.project}\n{wandb.run.id}\n", encoding="utf-8"
+            )
         except Exception as e:
             print(f"[warn] wandb init failed: {type(e).__name__}: {e} — continuing without wandb")
 

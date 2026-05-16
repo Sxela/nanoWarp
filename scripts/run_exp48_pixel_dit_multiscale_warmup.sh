@@ -61,6 +61,7 @@ python3 experiments/010_img2img_photo2comics/validate.py \
     data/photo2anime_1k/photo2anime_1k \
     --checkpoint "$OUTDIR/exp48_model.pt" \
     --image-size 512 --batch-size 2 --max-batches 25 --sample-steps 20 --use-ema \
+    --wandb-resume "$OUTDIR" \
     --outdir "out/val_exp48_final_512px" \
     2>&1 | tee "out/val_exp48_final_512px.log"
 
@@ -70,6 +71,7 @@ python3 experiments/010_img2img_photo2comics/validate.py \
     data/photo2anime_1k/photo2anime_1k \
     --checkpoint "$OUTDIR/exp48_model.pt" \
     --image-size 256 --batch-size 4 --max-batches 25 --sample-steps 20 --use-ema \
+    --wandb-resume "$OUTDIR" \
     --outdir "out/val_exp48_final_256px" \
     2>&1 | tee "out/val_exp48_final_256px.log"
 
