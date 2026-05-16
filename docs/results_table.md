@@ -47,8 +47,20 @@ Established 2026-05-16. Old runs validated retroactively on this split.
 |---|---|---|---|---|---|---|---|---|
 | exp25 (80k) | 1k synth | base | 0.169 | 0.345 | 0.500 | 0.216 | 0.392 | — |
 | exp35 (20k) | 1k synth | +dec_attn+pyramid | 0.178 | 0.370 | 0.477 | 0.215 | 0.384 | — |
-| **exp50 (20k)** | **3k mixed** | exp35 arch | **0.124** | **0.285** | **0.544** | **0.170** | **0.444** | **+0.037** |
-| exp51 (20k) | 2.3k FFHQ-only | exp35 arch | TBD | TBD | TBD | TBD | TBD | TBD |
+| **exp50 (20k)** | **3k mixed** | exp35 arch | 0.124 | 0.285 | 0.544 | 0.170 | 0.444 | +0.037 |
+| exp51 (20k) | 2.3k FFHQ-only | exp35 arch | **0.122** | **0.280** | **0.550** | 0.168 | 0.448 | **+0.031** |
+
+## Cross-domain val (FFHQ-only-trained on legacy val)
+
+| run | data | legacy face_lpips_sq | legacy face_ssim |
+|---|---|---|---|
+| exp35 (20k) | 1k synth | **0.153** | **0.728** |
+| exp50 (20k) | 3k mixed | 0.201 (-31%) | 0.605 (-17%) |
+| exp51 (20k) | 2.3k FFHQ-only | 0.290 (-90%) | 0.510 (-30%) |
+
+FFHQ-only training catastrophically loses small/peripheral face capability.
+Mixed (exp50) is the sane tradeoff: marginally worse on FFHQ portraits
+than FFHQ-only, much better on legacy than FFHQ-only.
 
 ## Notes on reading the table
 

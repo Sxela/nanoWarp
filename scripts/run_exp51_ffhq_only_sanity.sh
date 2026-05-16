@@ -72,14 +72,30 @@ echo "[exp51] cross-domain val on legacy photo2anime_1k val (out-of-distribution
 # Validates the FFHQ-only-trained model on the original 100 group-photo val
 # pairs. Measures how badly FFHQ-only training overfits to centered portraits
 # vs handling small / off-center / peripheral faces in group photos.
-python3 experiments/010_img2img_photo2comics/validate.py \
-    data/photo2anime_1k \
-    --checkpoint "$OUTDIR/exp51_model.pt" \
-    --split val \
-    --image-size 256 --batch-size 4 --max-batches 25 --sample-steps 20 --use-ema \
-    --wandb-resume "$OUTDIR" --wandb-key-prefix final_val_legacy \
-    --outdir "out/val_exp51_final_256px_val_legacy" \
-    2>&1 | tee "out/val_exp51_final_256px_val_legacy.log"
+#
+# Layout autodetect: Colab unzipped the original dataset to a double-nested
+# `data/photo2anime_1k/photo2anime_1k/val/...`; local merge build keeps it
+# single-nested at `data/photo2anime_1k/val/...`. Probe and use whichever
+# has `val/source/`.
+if [ -d "data/photo2anime_1k/photo2anime_1k/val/source" ]; then
+    LEGACY_ROOT="data/photo2anime_1k/photo2anime_1k"
+elif [ -d "data/photo2anime_1k/val/source" ]; then
+    LEGACY_ROOT="data/photo2anime_1k"
+else
+    echo "[warn] legacy val not found at either path — skipping cross-domain val"
+    LEGACY_ROOT=""
+fi
+
+if [ -n "$LEGACY_ROOT" ]; then
+    python3 experiments/010_img2img_photo2comics/validate.py \
+        "$LEGACY_ROOT" \
+        --checkpoint "$OUTDIR/exp51_model.pt" \
+        --split val \
+        --image-size 256 --batch-size 4 --max-batches 25 --sample-steps 20 --use-ema \
+        --wandb-resume "$OUTDIR" --wandb-key-prefix final_val_legacy \
+        --outdir "out/val_exp51_final_256px_val_legacy" \
+        2>&1 | tee "out/val_exp51_final_256px_val_legacy.log"
+fi
 
 echo "[exp51] done. Compare:"
 echo "  exp25 (80k, 1k synth)        on val_portraits: face_lpips_sq=0.169  face_ssim=0.500"
