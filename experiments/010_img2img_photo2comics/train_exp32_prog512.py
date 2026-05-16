@@ -508,10 +508,12 @@ def parse_args():
                         "256 runs that's 256, for full progressive 128→256→512 it's 512). "
                         "Set explicitly to pin val at a fixed res.")
     p.add_argument("--panel-every", type=int, default=5_000)
-    p.add_argument("--panel-keys", default="000942,000943,000921",
+    p.add_argument("--panel-keys", default="ffhq_002321,ffhq_002350,ffhq_002370,000942,000943,000921",
                    help="Comma-separated val sample stems to pin into every panel "
-                        "snapshot. Default = three close-up faces from the val split. "
-                        "Empty string = first val batch (legacy behaviour).")
+                        "snapshot. Default = three FFHQ portraits (from val_portraits, "
+                        "3k-era runs) + three legacy close-up faces (from val, retained "
+                        "for continuity). Stems missing from the dataset are silently "
+                        "skipped. Empty string = first val batch (legacy behaviour).")
     p.add_argument("--checkpoint-every", type=int, default=10_000)
     p.add_argument("--best-every", type=int, default=5_000,
                    help="Evaluate at this interval and save model_best.pt if val LPIPS improves")
@@ -616,22 +618,35 @@ def run_val(ema_model, diffusion, val_loader, args, device, step, outdir, wandb)
     return mean_lpips_clean
 
 
-def build_panel_batch(val_pairs, panel_keys, image_size, device):
+def build_panel_batch(pair_pools, panel_keys, image_size, device):
     """Pre-build a fixed batch from specific val stems (e.g. close-up faces) so
     every panel snapshot shows the same comparable samples across runs.
+
+    `pair_pools` is a list of pair-list-objects (e.g. [val_pairs,
+    val_portraits_pairs]); stems are searched across all pools in order.
+    Stems matching multiple pools resolve to the first hit. Stems not
+    found in any pool are silently skipped.
+
     Returns None when panel_keys is empty or no matching stems are found.
     """
-    keys = {k.strip() for k in panel_keys.split(",") if k.strip()}
+    keys = [k.strip() for k in panel_keys.split(",") if k.strip()]
     if not keys:
         return None
-    selected = [(s, t) for (s, t) in val_pairs if s.stem in keys]
+    # Build stem → (source, target) map across all pools.
+    stem_to_pair = {}
+    for pool in pair_pools:
+        for s, t in pool:
+            if s.stem not in stem_to_pair:
+                stem_to_pair[s.stem] = (s, t)
+    # Preserve user-specified order of panel_keys.
+    selected = [stem_to_pair[k] for k in keys if k in stem_to_pair]
     if not selected:
         return None
     ds = ProgPairedDataset(selected, image_size=image_size, val=True)
     sources = torch.stack([ds[i]["source"] for i in range(len(selected))]).to(device)
     targets = torch.stack([ds[i]["target"] for i in range(len(selected))]).to(device)
-    return {"source": sources, "target": targets,
-            "stems": [s.stem for (s, _) in selected]}
+    found_stems = [s.stem for (s, _) in selected]
+    return {"source": sources, "target": targets, "stems": found_stems}
 
 
 @torch.no_grad()
@@ -846,7 +861,16 @@ def main():
     data_root = Path(args.data_root)
     train_pairs = _list_pairs(data_root, "train")
     val_pairs   = _list_pairs(data_root, "val")
-    print(f"dataset: {len(train_pairs)} train pairs, {len(val_pairs)} val pairs")
+    # 3k-era dataset has an extra val_portraits split with FFHQ frontal faces.
+    # Used only as an additional source for the panel batch (so we can pin
+    # frontal portrait stems); the in-loop val loop still uses `val/`.
+    try:
+        val_portraits_pairs = _list_pairs(data_root, "val_portraits")
+        print(f"dataset: {len(train_pairs)} train, {len(val_pairs)} val, "
+              f"{len(val_portraits_pairs)} val_portraits pairs")
+    except (ValueError, FileNotFoundError):
+        val_portraits_pairs = []
+        print(f"dataset: {len(train_pairs)} train, {len(val_pairs)} val pairs")
     print(f"aug  scale=[{args.aug_scale_min},{args.aug_scale_max}]  "
           f"rotate=±{args.aug_rotate_deg}°  perspective={args.aug_perspective}@p={args.aug_perspective_prob}")
     print(f"aug  brightness=±{args.aug_brightness}  contrast=±{args.aug_contrast}  saturation=±{args.aug_saturation}")
@@ -864,7 +888,9 @@ def main():
 
     # Pinned face-closeup panel batch (always the same val samples across
     # steps and runs → directly comparable face crops).
-    face_panel_batch = build_panel_batch(val_pairs, args.panel_keys, val_image_size, device)
+    face_panel_batch = build_panel_batch(
+        [val_pairs, val_portraits_pairs], args.panel_keys, val_image_size, device,
+    )
     if face_panel_batch is not None:
         print(f"[face_panel] pinned val stems: {face_panel_batch['stems']}")
     else:
