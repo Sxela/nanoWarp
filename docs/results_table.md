@@ -43,11 +43,12 @@ Bold = best in column among 20k-step single-phase runs on legacy val.
 
 Established 2026-05-16. Old runs validated retroactively on this split.
 
-| run | data | arch | face_lpips_sq | face_lpips_vgg | face_ssim | whole lpips_sq | whole ssim |
-|---|---|---|---|---|---|---|---|
-| **exp25 (80k)** | 1k synth | base | **0.169** | **0.345** | **0.500** | 0.216 | **0.392** |
-| exp35 (20k) | 1k synth | +dec_attn+pyramid | 0.178 | 0.370 | 0.477 | **0.215** | 0.384 |
-| **exp50** (20k) | 3k mixed | exp35 arch | TBD | TBD | TBD | TBD | TBD |
+| run | data | arch | face_lpips_sq | face_lpips_vgg | face_ssim | whole lpips_sq | whole ssim | Δ lpips_vgg |
+|---|---|---|---|---|---|---|---|---|
+| exp25 (80k) | 1k synth | base | 0.169 | 0.345 | 0.500 | 0.216 | 0.392 | — |
+| exp35 (20k) | 1k synth | +dec_attn+pyramid | 0.178 | 0.370 | 0.477 | 0.215 | 0.384 | — |
+| **exp50 (20k)** | **3k mixed** | exp35 arch | **0.124** | **0.285** | **0.544** | **0.170** | **0.444** | **+0.037** |
+| exp51 (20k) | 2.3k FFHQ-only | exp35 arch | TBD | TBD | TBD | TBD | TBD | TBD |
 
 ## Notes on reading the table
 
