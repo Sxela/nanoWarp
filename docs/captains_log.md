@@ -1,4 +1,12 @@
-# Captain's log — img2img photo→anime
+# Captain's log — img2img photo→anime (legacy 1k-synth dataset era)
+
+> **2026-05-16 split note**: All experiments through exp49 trained on
+> `data/photo2anime_1k/` (1k Flux-synthetic pairs) with the legacy 100-pair
+> group-photo val split. Metrics here are **not directly comparable** to the
+> new-era log.
+>
+> For the 3k-dataset era (exp50+) see **[captains_log_3k.md](captains_log_3k.md)**.
+> For a cross-era fast-reference table see **[results_table.md](results_table.md)**.
 
 A chronological record of experiments run, with the exact command used for each.
 Findings and reasoning live in [findings_2026-05-09.md](findings_2026-05-09.md);
@@ -2707,22 +2715,115 @@ pairs) as the next leverage axis.
 
 ---
 
-## Data scale-up (2026-05-16)
+## Dataset switch — `photo2anime_3k` (2026-05-16)
 
-Downloaded 2.5k FFHQ at 1024px to `data/source_pool/ffhq/` (3.3GB). Plan:
-generate Flux-edit pairs with the same prompt that produced the existing
-1k set, expand training data to ~3.5k pairs total → ~3.5× of current.
-Highest-leverage next move now that architecture is data-saturated.
+All experiments after exp49 use the new merged dataset and a new val
+split. See **[captains_log_3k.md](captains_log_3k.md)** for the 3k-era
+log; metrics there are not directly comparable to numbers below.
 
-Used `merkol/ffhq-256` as smoke-test (worked at 256² but too small for
-Flux input quality), then `pravsels/FFHQ_1024` for the real 1024² pull.
-HF streaming dropped at ~50% (~4 hours) on Windows; script is resumable
-via skip-if-exists. 2.5k is enough to validate the data-scale hypothesis;
-extending to 5k later is straightforward.
+Legacy log entries continue here for runs trained on `photo2anime_1k`.
 
-Unsplash Lite download URLs are stale (2025 redistribution change);
-data-portal requires terms acceptance. Skipped for now — FFHQ alone is
-the right starting point for the face-quality pain point.
+---
+
+## exp46 — compressed progressive (1k @ 128 + 4k @ 256 + 15k @ 512, exp35 arch + clean aug)
+
+**Status: DONE 2026-05-16** (worse than exp35 at 256, similar to exp32-100k at 512)
+
+The proven exp32 progressive shape (compute-balanced phases) compressed
+into a 20k budget. At 512 the model trained for only 15k steps vs
+exp32-100k's 75k, so undersamples the largest phase.
+
+Final val:
+
+| metric | exp46 @ 256 | exp46 @ 512 | exp35 @ 256 (ref) | exp32-100k @ 512 (ref) |
+|---|---|---|---|---|
+| lpips_sq | 0.186 | 0.140 (in-loop) | **0.124** | 0.154 |
+| ssim | 0.452 | ~0.62 (in-loop) | **0.689** | 0.629 |
+| Δ lpips_vgg | +0.081 | — | +0.133 | **+0.040** |
+
+The 256 numbers are misleading — the model spent 75% of training at 512,
+so 256 inference is OOD. In-loop 512 val (lpips_sq 0.140) is competitive
+with exp32-100k 0.154 — at *roughly* the same per-step compute as exp32
+but with a 5× shorter total budget. Phase 3 didn't get enough steps to
+fully converge at 512.
+
+**Lesson**: progressive training needs *enough steps per phase*, not just
+the right shape. Compressed-to-20k starves the largest phase. Either go
+full 100k (exp32) or skip progressive entirely (exp35 baseline).
+
+---
+
+## exp47 — pure-pixel DiT (HiDream-O1 style), exp35 recipe slot
+
+**Status: DONE 2026-05-16** (block artifacts, worse than UNet)
+
+Pure-pixel transformer architecture per the HiDream-O1 paper: patch=16
+linear embedding → 11 DiT blocks at dim=384 → linear unpatchify (no
+conv stem, no decoder). 48.5M params, matching the 49M UNet budget for
+fair A/B.
+
+Result: worse than UNet at every metric. **Visible block artifacts** in
+panels — patch boundaries aren't smoothed by any conv stem/head, and at
+1k pairs the model can't learn cross-patch coherence purely through
+self-attention.
+
+How HiDream avoids this at 8B params: **brute force scale**. Their
+`FinalLayer` is literally just `self.linear(x)`. No spatial smoothing
+trick — they just have enough capacity + data that attention learns
+cross-patch consistency empirically. We're firmly in the opposite
+regime (49M params, 1k pairs).
+
+---
+
+## exp48 — pixel DiT + multiscale + LPIPS warmup
+
+**Status: DONE 2026-05-16** (still bad, multiscale didn't fix DiT)
+
+Three fixes applied to exp47:
+  1. Progressive 1k @ 128 (64 tokens) → 4k @ 256 (256 tokens) → 15k @ 512
+     (1024 tokens). Start small to let attention learn cross-patch
+     coherence quickly with limited data.
+  2. LPIPS-weight warmup 0 → 0.2 over the 128 phase. Pure flow-MSE
+     establishes structure first.
+  3. Linear ramp (`--lpips-weight-warmup-steps` flag added).
+
+Result: still bad at both 256 (lpips_sq 0.377, 3× exp35) and 512
+(lpips_sq 0.451, 3× exp32-100k). The multiscale + warmup helped a bit
+at 128/256 but the model couldn't learn at 1024 tokens (512px) with
+1k pairs.
+
+**Conclusion**: pure pixel DiT is dead at our data scale. Even with
+multi-day MAE pretraining on a 13k Imagenette subset, the 0.3 lpips_sq
+gap probably wouldn't close. UNet's conv inductive bias is doing real
+work that DiT needs ~10–100× more data to replicate.
+
+---
+
+## exp49 — UNet + 1k @ 128 bootstrap + 19k @ 256, exp35 arch + clean aug
+
+**Status: DONE 2026-05-16** (LPIPS tied, SSIM regressed — 128 bootstrap didn't help)
+
+Direct A/B vs exp35: same compute (5.24B pixel-samples), only
+difference is whether the first 5% of training is at 128px (bs=16) or
+256px (bs=4). Answers "does a 128px bootstrap help final 256 quality?"
+
+Final val on legacy val/:
+
+| metric | exp35 | exp49 (+128 bootstrap) |
+|---|---|---|
+| lpips_sq | **0.124** | 0.129 (tied) |
+| lpips_vgg | **0.240** | 0.255 |
+| ssim | **0.689** | 0.530 (big regression) |
+| face_ssim | **0.728** | 0.619 |
+
+LPIPS metrics essentially tied, but SSIM cratered. Unusual divergence —
+outputs are *perceptually* similar but *pixel-wise* less aligned. The
+1k phase change at 128 disrupted optimizer / EMA state in a way 19k
+follow-up steps didn't fully recover.
+
+**Answer to "does 128 bootstrap help"**: no, at 1k pairs. Compressed
+progressive is dead at this scale. exp35's single-shot 256 stays
+canonical.
 
 ---
 
