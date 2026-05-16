@@ -51,6 +51,10 @@ def parse_args():
                         "`val_portraits/` split instead of training. Default 200. "
                         "The existing val/ split is preserved unchanged. Set to 0 "
                         "to disable and route all FFHQ pairs to train.")
+    p.add_argument("--skip-base", action="store_true",
+                   help="Skip mirroring the --base dataset. Output contains only "
+                        "FFHQ pairs (train + val_portraits). Useful for sanity "
+                        "tests that isolate FFHQ-domain learning.")
     return p.parse_args()
 
 
@@ -60,18 +64,21 @@ def main():
     ffhq = Path(args.ffhq)
     out = Path(args.out)
 
-    # 1. Mirror base splits into out via hardlink.
-    for split in ("train", "val"):
-        for side in ("source", "target"):
-            src_dir = base / split / side
-            dst_dir = out / split / side
-            if not src_dir.is_dir():
-                print(f"[warn] missing {src_dir}")
-                continue
-            for p in src_dir.iterdir():
-                if p.is_file():
-                    _link_or_copy(p, dst_dir / p.name)
-    print(f"[merge] mirrored {base} -> {out}")
+    # 1. Mirror base splits into out via hardlink (unless --skip-base).
+    if args.skip_base:
+        print(f"[merge] --skip-base: output will contain only FFHQ pairs")
+    else:
+        for split in ("train", "val"):
+            for side in ("source", "target"):
+                src_dir = base / split / side
+                dst_dir = out / split / side
+                if not src_dir.is_dir():
+                    print(f"[warn] missing {src_dir}")
+                    continue
+                for p in src_dir.iterdir():
+                    if p.is_file():
+                        _link_or_copy(p, dst_dir / p.name)
+        print(f"[merge] mirrored {base} -> {out}")
 
     # 2. Add FFHQ pairs. Last `val_portraits_count` go to `val_portraits/`,
     #    rest go to `train/`.
@@ -105,6 +112,12 @@ def main():
         name = f"{args.prefix}_{idx}.png"
         _link_or_copy(sp, out / "val_portraits" / "source" / name)
         _link_or_copy(ap, out / "val_portraits" / "target" / name)
+        # When --skip-base there's no legacy val/ to preserve; route the
+        # FFHQ val pairs into val/ as well so the training script's required
+        # val loader has data to read.
+        if args.skip_base:
+            _link_or_copy(sp, out / "val" / "source" / name)
+            _link_or_copy(ap, out / "val" / "target" / name)
     print(f"[merge] FFHQ pairs: {len(train_pairs)} -> train, {len(val_pairs)} -> val_portraits, "
           f"skipped {skipped} unmatched")
 
