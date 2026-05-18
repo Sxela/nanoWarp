@@ -218,65 +218,80 @@ val_portraits.
 
 ## exp53 — LANCZOS resize on exp50 recipe
 
-**Status: WIRED 2026-05-18**
+**Status: DONE 2026-05-18** (negative result, exp52 stays canonical)
 
 One-flag delta vs exp50: PIL resize filter for the source-pool
-downscale switched from BILINEAR to LANCZOS. FFHQ sources are 512px;
-training downscales to 256 (or 256·scale for the random zoom).
-BILINEAR softens edges noticeably on a 2× downscale — LANCZOS is the
-standard fix for preserving high-frequency detail.
+downscale switched from BILINEAR to LANCZOS on the "real" resize
+paths (initial scaled zoom, val direct resize, post-crop fallback).
+Affine (rotate/perspective) and corruption-aug paths kept BILINEAR.
+Same architecture, same data, same recipe, 20k @ 256px bs=4.
 
-Only the "real" resize paths flip to LANCZOS:
-- initial scaled-zoom downscale (train)
-- val-mode direct resize
-- post-crop fallback resize
+Hypothesis: sharper input → finer prediction → better face metrics
+on portraits.
 
-Affine (rotate/perspective) **stays BILINEAR** — LANCZOS on sub-pixel
-affine sampling introduces ringing/halos. Corruption-aug resize-down+up
-also stays BILINEAR by design (it's meant to be lossy).
+**Results** (vs exp50 BILINEAR, same recipe):
 
-Same architecture as exp35/50/52 (decoder_attn + pyramid + FiLM), same
-data (3k mixed), same recipe, 20k @ 256px bs=4. A/B test target: does
-sharper source signal improve face-quality metrics?
+| split | metric | exp50 | exp53 | Δ |
+|---|---|---|---|---|
+| val (legacy) | lpips_sq | 0.150 | **0.148** | -1% (tie) |
+| val (legacy) | lpips_vgg | 0.297 | 0.303 | +2% (regress) |
+| val (legacy) | ssim | 0.516 | 0.485 | **-6% (regress)** |
+| val (legacy) | face_lpips_sq | 0.201 | 0.214 | **+6.5% (regress)** |
+| val (legacy) | face_lpips_vgg | 0.379 | 0.402 | **+6% (regress)** |
+| val (legacy) | face_ssim | 0.605 | 0.533 | **-12% (regress)** |
+| val_portraits | lpips_sq | 0.170 | **0.164** | -3.5% (small win) |
+| val_portraits | lpips_vgg | 0.353 | 0.355 | tie |
+| val_portraits | ssim | 0.444 | 0.423 | -5% (regress) |
+| val_portraits | **face_lpips_sq** | **0.124** | **0.124** | **0% (exact tie)** |
+| val_portraits | face_lpips_vgg | 0.285 | 0.289 | +1% (tie) |
+| val_portraits | face_ssim | 0.544 | 0.521 | -4% (regress) |
+| val_portraits | Δ lpips_vgg | 0.037 | 0.039 | tie |
 
-A/B target — exp50 at 20k (BILINEAR) on val_portraits:
-- face_lpips_sq=0.124, face_lpips_vgg=0.285, face_ssim=0.544
-- whole lpips_sq=0.170, whole ssim=0.444
+**Interpretation**: not the lever. Three signals point the same way:
 
-```bash
-WANDB_API_KEY=... bash scripts/run_exp53_lanczos_at_exp50_recipe.sh
-```
+1. **face_lpips_sq on val_portraits is identical** (0.124 → 0.124).
+   The model wasn't bottlenecked on input sharpness — LPIPS-squeeze
+   on FFHQ portraits at 512→256 doesn't discriminate between
+   BILINEAR and LANCZOS source.
+
+2. **SSIM regresses across the board** (-4% to -12%). LANCZOS
+   overshoot near sharp edges produces small pixel-space variations
+   that SSIM (luminance + structure) penalizes hard, even though
+   the images look visually sharper. Known property of LANCZOS.
+
+3. **Legacy val face metrics regress sharply** (face_lpips_sq
+   +6.5%, face_ssim -12%). Legacy val has tiny / peripheral /
+   non-frontal faces — at small pixel sizes, LANCZOS ringing
+   amplifies edge noise rather than recovering detail. The tiny
+   `lpips_sq -3.5%` win on portraits is overwhelmed by these
+   regressions everywhere else.
+
+**Conclusion**: BILINEAR was already adequate at 512→256. Sharpness
+isn't the bottleneck; data diversity / training duration are. Do
+**not** promote to 80k — exp52 stays the canonical baseline.
+
+**What this rules out**: any "free win from better resize" hypothesis
+at the current 256px target. If we move to 384/512 target later, the
+downscale ratio shrinks and LANCZOS matters even less — so this
+result implicitly closes that door too.
 
 Script: `scripts/run_exp53_lanczos_at_exp50_recipe.sh`
 Outdir: `out/exp53_lanczos_at_exp50_recipe_noenc_attn163264_bf16_mc88_256px_20k`
-
-**Hypothesis**: sharper input → finer detail in target prediction →
-better face_lpips on portraits. SSIM may move less since it's
-luminance/structure-dominated, but should not regress. If LANCZOS wins
-at 20k, promote to 80k (would become the new canonical baseline,
-replacing exp52).
-
-**Risks / what could go wrong**:
-1. LANCZOS can overshoot (negative pixel values clamped to [0,1] by
-   PIL on uint8 round-trip). Smoke test confirmed val pixels stay in
-   [0,1]; no observed artifacts.
-2. Affine + corruption paths keeping BILINEAR is the right call but
-   means the source goes through mixed filters depending on which
-   aug fires. With clean_prob=1.0 in this recipe, corruption-aug is
-   off, so the only mixed-filter case is when rotate/perspective is
-   enabled (both 0.0 here) — i.e. the recipe as configured is pure
-   LANCZOS on the source path.
 
 ---
 
 ## Open follow-ups (3k era, updated 2026-05-18)
 - **More diverse real-photo sources**: Unsplash people, Places365
   with people-filter, AFW/IJB-C in-the-wild faces. Currently FFHQ
-  alone biases toward studio-lit Western 25-35yo portraits.
+  alone biases toward studio-lit Western 25-35yo portraits. This is
+  now the highest-leverage open lever, since exp53 ruled out
+  resize-filter and exp50→exp52 already extracted the training-
+  duration gain.
 - **Resolution scale-up**: every 3k-era run is at 256px; FFHQ source
-  is 512. Train at 384 or 512 to test the resolution ceiling. Pairs
-  well with LANCZOS (exp53) since the sharpening effect grows with
-  the downscale ratio.
+  is 512. Train at 384 or 512 to test the resolution ceiling.
+  Independent of exp53's negative — at 512 target, BILINEAR is
+  near-identity on 512px sources so this is a "more pixels of
+  capacity" experiment, not a "sharper input" one.
 - **Curriculum option** (deferred): if portrait quality stalls below
   some threshold, start from exp51's FFHQ-only checkpoint and
   fine-tune on the 3k mixed set. Might give exp50-on-FFHQ quality
