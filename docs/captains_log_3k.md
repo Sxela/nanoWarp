@@ -336,6 +336,54 @@ A/B target — exp50 (flow):
 
 ---
 
+## exp55 — diffusion, LPIPS=0 (pure MSE eps prediction)
+
+**Status: WIRED 2026-05-18**
+
+One-flag delta vs exp54: `--lpips-weight 0.0`. Tests whether LPIPS on
+`x0_hat` is actively hurting diffusion training.
+
+Why it might hurt: in eps-prediction diffusion, the per-step `x0_hat`
+estimate is
+
+    x0_hat = (x_t - sqrt(1 - alpha_bar) * eps_hat) / sqrt(alpha_bar)
+
+At high t the denominator `sqrt(alpha_bar)` approaches 0, so any
+eps_hat error gets divided by a tiny number → `x0_hat` is essentially
+amplified noise. LPIPS on amplified noise gives a misleading gradient
+that pushes eps_hat *away* from the right answer. Flow doesn't have
+this pathology — `x_target_hat = x_t + (1-t) * v_hat` is a smooth
+extrapolation that never blows up.
+
+A/B targets:
+- exp50 (flow, lpips=0.2): val_portraits face_lpips_sq=0.124
+- exp54 (diffusion, lpips=0.2): TBD (running)
+- **exp55 (diffusion, lpips=0.0)**: hypothesis-test
+
+Decision tree:
+- **exp55 > exp54**: LPIPS net-negative for diffusion. Promote exp55 as
+  canonical diffusion baseline. Follow up with **exp55b** = LPIPS warmup
+  `--lpips-weight 0.2 --lpips-weight-warmup-steps 5000` to recover face
+  quality after eps prediction stabilizes (flag already exists, no code
+  changes needed).
+- **exp55 ~ exp54**: LPIPS neutral for diffusion. Drop it from the recipe
+  for simplicity.
+- **exp55 < exp54**: LPIPS helped despite the high-t pathology. Keep at
+  0.2 — the noisy `x0_hat` gradient is still better than no perceptual
+  signal at all.
+
+```bash
+WANDB_API_KEY=... bash scripts/run_exp55_diffusion_lpips0_at_exp54_recipe.sh
+```
+
+Script: `scripts/run_exp55_diffusion_lpips0_at_exp54_recipe.sh`
+Outdir: `out/exp55_diffusion_eps_lpips0_at_exp54_recipe_noenc_attn163264_bf16_mc88_256px_20k`
+
+Final val uses 100 DDIM steps (matches exp54). In-loop val stays at 20
+for training speed.
+
+---
+
 ## Open follow-ups (3k era, updated 2026-05-18)
 - **More diverse real-photo sources**: Unsplash people, Places365
   with people-filter, AFW/IJB-C in-the-wild faces. Currently FFHQ
