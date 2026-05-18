@@ -99,6 +99,15 @@ def main():
         # regardless of training color space.
         return linear_to_srgb(x).clamp(0, 1) if color_space == "linear_rgb" else x
 
+    def sample_kwargs(log_every):
+        # cfg_scale is a flow-only kwarg; GaussianImageDiffusion.sample
+        # doesn't accept it. Conditionally include it.
+        kw = dict(image_size=args.image_size, sample_steps=args.sample_steps,
+                  log_every=log_every)
+        if method == "flow":
+            kw["cfg_scale"] = args.cfg_scale
+        return kw
+
     losses = []
     ssim_vals = []
     lpips_vals = []
@@ -131,12 +140,7 @@ def main():
 
         if panels_written < args.panel_count:
             samples, frames = diffusion.sample(
-                model,
-                source,
-                image_size=args.image_size,
-                sample_steps=args.sample_steps,
-                log_every=args.progress_every,
-                cfg_scale=args.cfg_scale,
+                model, source, **sample_kwargs(log_every=args.progress_every),
             )
 
             if method == "flow":
@@ -175,12 +179,7 @@ def main():
             panels_written += 1
         else:
             samples, _frames = diffusion.sample(
-                model,
-                source,
-                image_size=args.image_size,
-                sample_steps=args.sample_steps,
-                log_every=None,
-                cfg_scale=args.cfg_scale,
+                model, source, **sample_kwargs(log_every=None),
             )
             metric_vals = metrics_fn.compute(to_display(samples), to_display(target))
             ssim_vals.append(metric_vals["ssim"])
@@ -190,12 +189,7 @@ def main():
         # --- corruption-robustness pass on the same batch ---
         source_corr = val_corrupt(source)
         samples_corr, _ = diffusion.sample(
-            model,
-            source_corr,
-            image_size=args.image_size,
-            sample_steps=args.sample_steps,
-            log_every=None,
-            cfg_scale=args.cfg_scale,
+            model, source_corr, **sample_kwargs(log_every=None),
         )
         m_corr = metrics_fn.compute(to_display(samples_corr), to_display(target))
         ssim_vals_corr.append(m_corr["ssim"])
