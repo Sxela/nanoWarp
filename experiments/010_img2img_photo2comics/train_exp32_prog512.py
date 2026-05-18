@@ -1004,14 +1004,25 @@ def main():
                 loss = loss + vgg_terms["total"]
 
         loss_val = float(loss.item())
+        # Track every step (incl. skipped) so the rolling mean self-corrects
+        # after a regime shift. Old code appended only after the skip checks,
+        # which froze recent_mean and caused a dead-loop when the loss entered
+        # a new low-loss regime (e.g. diffusion-eps without LPIPS smoothing:
+        # 0.0001 -> 0.0012 is 12x but harmless, yet the frozen mean kept
+        # tripping the threshold forever).
+        losses.append(loss_val)
         if not math.isfinite(loss_val):
             print(f"step {step:6d} | SKIP non-finite loss={loss_val}")
             optimizer.zero_grad(set_to_none=True)
             continue
-        if len(losses) >= 10:
-            recent_mean = sum(losses[-50:]) / min(50, len(losses))
-            if recent_mean > 0 and loss_val > 10.0 * recent_mean:
-                print(f"step {step:6d} | SKIP spike {loss_val/recent_mean:.1f}x")
+        if len(losses) >= 11:
+            baseline = losses[-51:-1]  # exclude current
+            recent_mean = sum(baseline) / len(baseline)
+            # Spike check: large RELATIVE jump AND non-trivial ABSOLUTE size.
+            # The absolute floor (0.05) keeps tiny-loss regimes from
+            # generating spurious skips.
+            if recent_mean > 0 and loss_val > 10.0 * recent_mean and loss_val > 0.05:
+                print(f"step {step:6d} | SKIP spike {loss_val/recent_mean:.1f}x abs={loss_val:.4f}")
                 optimizer.zero_grad(set_to_none=True)
                 continue
 
@@ -1022,7 +1033,6 @@ def main():
             )
         optimizer.step()
         ema.update(model)
-        losses.append(loss_val)
 
         step_window += 1
         if step % args.log_every == 0:

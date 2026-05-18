@@ -40,8 +40,31 @@ export WANDB_CONFIG_DIR="${WANDB_CONFIG_DIR:-/tmp/wandb_config}"
 OUTDIR=out/exp55_diffusion_eps_lpips0_at_exp54_recipe_noenc_attn163264_bf16_mc88_256px_20k
 mkdir -p "$OUTDIR"
 
+# Auto-resume from the most-recent checkpoint in $OUTDIR if one exists.
+# Prefers periodic step-checkpoints (latest state). Falls back to
+# model_best.pt (only available between step 0 and the first --checkpoint-every
+# boundary, e.g. for the user who hit the SKIP dead-loop around step 4k).
+# Override with RESUME_FROM=/path/to/some_other.pt env var.
+RESUME_ARG=""
+if [ -n "${RESUME_FROM:-}" ]; then
+    RESUME_ARG="--resume ${RESUME_FROM}"
+    echo "[exp55] resuming from RESUME_FROM=${RESUME_FROM}"
+else
+    LATEST_STEP_CKPT=$(ls -t "$OUTDIR"/exp55_model_step_*.pt 2>/dev/null | head -1 || true)
+    if [ -n "$LATEST_STEP_CKPT" ]; then
+        RESUME_ARG="--resume ${LATEST_STEP_CKPT}"
+        echo "[exp55] resuming from ${LATEST_STEP_CKPT}"
+    elif [ -f "$OUTDIR/exp55_model_best.pt" ]; then
+        RESUME_ARG="--resume $OUTDIR/exp55_model_best.pt"
+        echo "[exp55] resuming from $OUTDIR/exp55_model_best.pt (no step_ ckpt yet)"
+    else
+        echo "[exp55] no prior checkpoint, fresh start"
+    fi
+fi
+
 python3 experiments/010_img2img_photo2comics/train_exp32_prog512.py \
     data/photo2anime_3k \
+    $RESUME_ARG \
     --method diffusion \
     --prediction-type eps \
     --diffusion-timesteps 1000 \

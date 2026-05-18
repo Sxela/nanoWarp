@@ -282,7 +282,8 @@ Outdir: `out/exp53_lanczos_at_exp50_recipe_noenc_attn163264_bf16_mc88_256px_20k`
 
 ## exp54 — diffusion (eps) re-test at exp50 recipe
 
-**Status: WIRED 2026-05-18**
+**Status: DONE 2026-05-18** — catastrophic regression. Bucket #2 of
+the hypothesis tree.
 
 Re-running the experiment that "doomed" classical Gaussian diffusion in
 the legacy era — but with every known confounder fixed. exp01-exp06
@@ -333,6 +334,54 @@ A/B target — exp50 (flow):
 - val_portraits face_lpips_sq=0.124, face_lpips_vgg=0.285, face_ssim=0.544
 - val_portraits whole lpips_sq=0.170, whole ssim=0.444
 - legacy val face_lpips_sq=0.201, face_ssim=0.605
+
+**Results (final val @ 100 DDIM steps, EMA)**:
+
+| split | metric | exp50 (flow @ 20) | exp54 (diffusion @ 100) | delta |
+|---|---|---|---|---|
+| val_portraits | face_lpips_sq | **0.124** | **0.508** | **+310%** |
+| val_portraits | face_lpips_vgg | 0.285 | 0.760 | +167% |
+| val_portraits | face_ssim | 0.544 | 0.370 | -32% |
+| val_portraits | whole lpips_sq | 0.170 | 0.514 | +202% |
+| val_portraits | whole lpips_vgg | 0.353 | 0.735 | +108% |
+| val_portraits | whole ssim | 0.444 | 0.368 | -17% |
+| val_portraits | Δ lpips_vgg | 0.037 | 0.047 | +27% |
+| legacy val | face_lpips_sq | 0.201 | 0.482 | +140% |
+| legacy val | face_lpips_vgg | 0.379 | 0.621 | +64% |
+| legacy val | face_ssim | 0.605 | 0.524 | -13% |
+| legacy val | whole lpips_sq | 0.150 | 0.433 | +189% |
+| legacy val | whole ssim | 0.516 | 0.322 | -38% |
+
+**Catastrophic across the board.** Not a marginal regression — diffusion
+at 100 DDIM steps produced output that's 2-4× worse on LPIPS metrics
+than flow at 20 Euler steps. The corruption-robustness gap (Δ_lpips_vgg)
+is actually only slightly worse on val_portraits (+27% vs exp50);
+the collapse is in *absolute quality*, not robustness.
+
+**Three candidate root causes**, in order of plausibility:
+
+1. **No source-as-init prior**. Flow's sample loop starts from `x = source`
+   and refines toward target — the source acts as a strong, free
+   inductive prior at every step. Diffusion samples from `x = N(0, I)`
+   and conditions on source as a separate input channel. At this model
+   size (~50M params), the conditioning signal alone isn't enough to
+   pull samples back to the image distribution. **This is structural to
+   the method.**
+
+2. **LPIPS-on-x0_hat pathology**. At high t, `x0_hat = (x_t - sqrt(1-ab)·eps_hat)/sqrt(ab)`
+   is amplified-noise garbage. LPIPS on garbage pushes eps_hat away
+   from the right answer — actively harmful. **exp55 (lpips=0) tests
+   this.** If exp55 ≫ exp54, this was the dominant factor.
+
+3. **eps prediction at small scale**. eps-target has the same variance
+   across all timesteps but the model has to handle wildly different
+   t-conditional distributions. v-prediction smooths this. **A future
+   exp could rerun with `--prediction-type v`.**
+
+**Next step**: exp55 (lpips=0) is still the right A/B because it
+disambiguates (1) from (2). If exp55 is also bad, (1) is the dominant
+cause and the diffusion baseline is structurally bottlenecked at this
+scale — no recipe rescue.
 
 ---
 
