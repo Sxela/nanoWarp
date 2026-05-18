@@ -109,6 +109,12 @@ class GaussianImageDiffusion:
         lpips_loss = torch.tensor(0.0, device=target.device)
         loss = diffusion_loss
         if aux_lpips is not None and aux_lpips_weight > 0:
+            # Reset before every call: torchmetrics LPIPS is a stateful Metric
+            # that accumulates sum_scores across calls. Without reset, the
+            # grad-fn chain grows one node per step → loss.backward() walks
+            # an ever-longer graph and throughput collapses ~10x over 20k
+            # steps. Same fix as flow.py:138.
+            aux_lpips.reset()
             lpips_loss = aux_lpips(x0_hat, target).mean()
             loss = loss + aux_lpips_weight * lpips_loss
         return loss, t, x_t, noise, model_out, x0_hat, diffusion_loss.detach(), lpips_loss.detach()
