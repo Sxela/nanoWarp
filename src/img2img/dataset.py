@@ -168,13 +168,31 @@ class PairedImageDataset(Dataset):
         }
 
 
+_RESIZE_INTERP_MODES = {
+    "bilinear": InterpolationMode.BILINEAR,
+    "bicubic": InterpolationMode.BICUBIC,
+    "lanczos": InterpolationMode.LANCZOS,
+    "nearest": InterpolationMode.NEAREST,
+}
+
+
+def resolve_resize_interp(name: str) -> InterpolationMode:
+    try:
+        return _RESIZE_INTERP_MODES[name.lower()]
+    except KeyError as e:
+        raise ValueError(
+            f"unknown resize_interp {name!r}; expected one of {sorted(_RESIZE_INTERP_MODES)}"
+        ) from e
+
+
 class IdentityPairedAugment:
-    def __init__(self, image_size: int = 128):
+    def __init__(self, image_size: int = 128, resize_interp: str = "bilinear"):
         self.image_size = image_size
+        self.interp = resolve_resize_interp(resize_interp)
 
     def __call__(self, src: Image.Image, tgt: Image.Image, seed: int | None = None):
-        src = TF.resize(src, [self.image_size, self.image_size], interpolation=InterpolationMode.BILINEAR)
-        tgt = TF.resize(tgt, [self.image_size, self.image_size], interpolation=InterpolationMode.BILINEAR)
+        src = TF.resize(src, [self.image_size, self.image_size], interpolation=self.interp)
+        tgt = TF.resize(tgt, [self.image_size, self.image_size], interpolation=self.interp)
         return src, tgt, src.copy()
 
 

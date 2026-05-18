@@ -50,7 +50,7 @@ from torch.utils.data import DataLoader, Dataset
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchvision.transforms.functional import InterpolationMode
 
-from src.img2img import EMA, Img2ImgDiffusionUNet, PixelDiT
+from src.img2img import EMA, Img2ImgDiffusionUNet, PixelDiT, resolve_resize_interp
 from src.img2img.flow import FlowConfig, RectifiedImageFlow
 from src.img2img.render import save_val_panel
 from src.utils.config import apply_yaml_config
@@ -152,6 +152,7 @@ class ProgPairedDataset(Dataset):
         jpeg_min: int = 30,
         jpeg_prob: float = 0.7,
         val: bool = False,
+        resize_interp: str = "bilinear",
     ):
         self.pairs = pairs
         self.image_size = image_size
@@ -173,6 +174,11 @@ class ProgPairedDataset(Dataset):
         self.jpeg_min = jpeg_min
         self.jpeg_prob = jpeg_prob
         self.val = val
+        # Resize interp for the "real" downscale paths (PIL): initial scaled
+        # zoom, val-mode direct resize, and the post-crop fallback. LANCZOS
+        # only valid on PIL — kept off the affine (rotate/perspective) and
+        # off the corruption-aug (intentionally lossy) paths.
+        self.resize_interp = resolve_resize_interp(resize_interp)
 
     def __len__(self) -> int:
         return len(self.pairs)
@@ -184,8 +190,8 @@ class ProgPairedDataset(Dataset):
 
         if self.val:
             sz = self.image_size
-            src = TF.resize(src, [sz, sz], interpolation=InterpolationMode.BILINEAR)
-            tgt = TF.resize(tgt, [sz, sz], interpolation=InterpolationMode.BILINEAR)
+            src = TF.resize(src, [sz, sz], interpolation=self.resize_interp)
+            tgt = TF.resize(tgt, [sz, sz], interpolation=self.resize_interp)
             return {"source": TF.to_tensor(src), "target": TF.to_tensor(tgt)}
 
         # Shared geometry (both src and tgt)
@@ -210,8 +216,8 @@ class ProgPairedDataset(Dataset):
         # Random zoom: resize so shorter side = sz * scale
         scale = random.uniform(self.scale_min, self.scale_max)
         resize_to = max(sz + 4, int(round(sz * scale)))  # +4 to ensure room to crop
-        src = TF.resize(src, resize_to, interpolation=InterpolationMode.BILINEAR)
-        tgt = TF.resize(tgt, resize_to, interpolation=InterpolationMode.BILINEAR)
+        src = TF.resize(src, resize_to, interpolation=self.resize_interp)
+        tgt = TF.resize(tgt, resize_to, interpolation=self.resize_interp)
 
         # Random rotation — same angle for both
         if self.rotate_deg > 0:
@@ -234,8 +240,8 @@ class ProgPairedDataset(Dataset):
             src = TF.crop(src, top, left, sz, sz)
             tgt = TF.crop(tgt, top, left, sz, sz)
         else:
-            src = TF.resize(src, [sz, sz], interpolation=InterpolationMode.BILINEAR)
-            tgt = TF.resize(tgt, [sz, sz], interpolation=InterpolationMode.BILINEAR)
+            src = TF.resize(src, [sz, sz], interpolation=self.resize_interp)
+            tgt = TF.resize(tgt, [sz, sz], interpolation=self.resize_interp)
 
         # Horizontal flip
         if random.random() < self.hflip_prob:
@@ -302,6 +308,7 @@ def make_loader(pairs, image_size, batch_size, args, val=False):
         jpeg_min=args.corrupt_jpeg_min,
         jpeg_prob=args.corrupt_jpeg_prob,
         val=val,
+        resize_interp=args.aug_resize_interp,
     )
     nw = args.num_workers
     dl_kw = dict(
@@ -465,6 +472,11 @@ def parse_args():
                    help="Probability of zeroing the source during training (CFG-style). "
                         "Enables CFG at inference. 0 = off (default).")
     # augmentation — shared geometry
+    p.add_argument("--aug-resize-interp", default="bilinear",
+                   choices=["bilinear", "bicubic", "lanczos", "nearest"],
+                   help="PIL resize filter for the source-pool downscale and val resize. "
+                        "LANCZOS preserves edge sharpness on >=2x downscales (e.g. 512->256). "
+                        "Affine (rotate/perspective) and corruption-aug paths stay BILINEAR.")
     p.add_argument("--aug-scale-min", type=float, default=1.0,
                    help="Min random resize scale (1.0 = full image view)")
     p.add_argument("--aug-scale-max", type=float, default=2.5,

@@ -60,6 +60,10 @@ def parse_args():
                         "If set, validate.py resumes that wandb run and logs the "
                         "final-val metrics under final_val/* so the numbers survive "
                         "post-training Colab death.")
+    p.add_argument("--aug-resize-interp", default="bilinear",
+                   choices=["bilinear", "bicubic", "lanczos", "nearest"],
+                   help="PIL resize filter for source-pool -> image_size. "
+                        "Should match the training run's --aug-resize-interp for honest numbers.")
     p.add_argument("--wandb-key-prefix", default="final_val",
                    help="Key prefix used when logging final-val metrics to wandb.")
     return p.parse_args()
@@ -81,7 +85,7 @@ def main():
 
     ds = PairedImageDataset(
         args.data_root,
-        augment=IdentityPairedAugment(image_size=args.image_size),
+        augment=IdentityPairedAugment(image_size=args.image_size, resize_interp=args.aug_resize_interp),
         split=args.split,
         color_space=color_space,
     )

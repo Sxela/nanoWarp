@@ -50,6 +50,7 @@ Established 2026-05-16. Old runs validated retroactively on this split.
 | exp50 (20k) | 3k mixed | exp35 arch | 0.124 | 0.285 | 0.544 | 0.170 | 0.444 | +0.037 |
 | exp51 (20k) | 2.3k FFHQ-only | exp35 arch | 0.122 | 0.280 | 0.550 | 0.168 | 0.448 | **+0.031** |
 | **exp52 (80k)** | **3k mixed** | exp35 arch | **0.101** | **0.244** | **0.579** | **0.145** | **0.459** | +0.045 |
+| exp53 (20k) | 3k mixed | exp35 arch + LANCZOS resize | TBD | TBD | TBD | TBD | TBD | TBD |
 
 ## Cross-domain val (FFHQ-only-trained on legacy val)
 

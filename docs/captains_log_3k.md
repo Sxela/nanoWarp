@@ -216,10 +216,67 @@ val_portraits.
 
 ---
 
-## Open follow-ups (3k era, updated 2026-05-16)
+## exp53 — LANCZOS resize on exp50 recipe
+
+**Status: WIRED 2026-05-18**
+
+One-flag delta vs exp50: PIL resize filter for the source-pool
+downscale switched from BILINEAR to LANCZOS. FFHQ sources are 512px;
+training downscales to 256 (or 256·scale for the random zoom).
+BILINEAR softens edges noticeably on a 2× downscale — LANCZOS is the
+standard fix for preserving high-frequency detail.
+
+Only the "real" resize paths flip to LANCZOS:
+- initial scaled-zoom downscale (train)
+- val-mode direct resize
+- post-crop fallback resize
+
+Affine (rotate/perspective) **stays BILINEAR** — LANCZOS on sub-pixel
+affine sampling introduces ringing/halos. Corruption-aug resize-down+up
+also stays BILINEAR by design (it's meant to be lossy).
+
+Same architecture as exp35/50/52 (decoder_attn + pyramid + FiLM), same
+data (3k mixed), same recipe, 20k @ 256px bs=4. A/B test target: does
+sharper source signal improve face-quality metrics?
+
+A/B target — exp50 at 20k (BILINEAR) on val_portraits:
+- face_lpips_sq=0.124, face_lpips_vgg=0.285, face_ssim=0.544
+- whole lpips_sq=0.170, whole ssim=0.444
+
+```bash
+WANDB_API_KEY=... bash scripts/run_exp53_lanczos_at_exp50_recipe.sh
+```
+
+Script: `scripts/run_exp53_lanczos_at_exp50_recipe.sh`
+Outdir: `out/exp53_lanczos_at_exp50_recipe_noenc_attn163264_bf16_mc88_256px_20k`
+
+**Hypothesis**: sharper input → finer detail in target prediction →
+better face_lpips on portraits. SSIM may move less since it's
+luminance/structure-dominated, but should not regress. If LANCZOS wins
+at 20k, promote to 80k (would become the new canonical baseline,
+replacing exp52).
+
+**Risks / what could go wrong**:
+1. LANCZOS can overshoot (negative pixel values clamped to [0,1] by
+   PIL on uint8 round-trip). Smoke test confirmed val pixels stay in
+   [0,1]; no observed artifacts.
+2. Affine + corruption paths keeping BILINEAR is the right call but
+   means the source goes through mixed filters depending on which
+   aug fires. With clean_prob=1.0 in this recipe, corruption-aug is
+   off, so the only mixed-filter case is when rotate/perspective is
+   enabled (both 0.0 here) — i.e. the recipe as configured is pure
+   LANCZOS on the source path.
+
+---
+
+## Open follow-ups (3k era, updated 2026-05-18)
 - **More diverse real-photo sources**: Unsplash people, Places365
   with people-filter, AFW/IJB-C in-the-wild faces. Currently FFHQ
   alone biases toward studio-lit Western 25-35yo portraits.
+- **Resolution scale-up**: every 3k-era run is at 256px; FFHQ source
+  is 512. Train at 384 or 512 to test the resolution ceiling. Pairs
+  well with LANCZOS (exp53) since the sharpening effect grows with
+  the downscale ratio.
 - **Curriculum option** (deferred): if portrait quality stalls below
   some threshold, start from exp51's FFHQ-only checkpoint and
   fine-tune on the 3k mixed set. Might give exp50-on-FFHQ quality
