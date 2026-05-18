@@ -52,6 +52,7 @@ from torchvision.transforms.functional import InterpolationMode
 
 from src.img2img import EMA, Img2ImgDiffusionUNet, PixelDiT, resolve_resize_interp
 from src.img2img.flow import FlowConfig, RectifiedImageFlow
+from src.img2img.diffusion import DiffusionConfig, GaussianImageDiffusion
 from src.img2img.render import save_val_panel
 from src.utils.config import apply_yaml_config
 
@@ -436,10 +437,20 @@ def parse_args():
     p.add_argument("--lr-cycle-mult", type=float, default=1.0,
                    help="Geometric cycle-length growth factor (T_mult). 1.0 = equal cycles; "
                         ">1.0 = each cycle is `mult` times longer than the previous.")
+    p.add_argument("--method", default="flow", choices=["flow", "diffusion"],
+                   help="Training method. 'flow' = rectified flow matching (canonical "
+                        "post-exp07); 'diffusion' = classic eps/v-prediction Gaussian "
+                        "diffusion (legacy exp01-exp06 family).")
+    p.add_argument("--diffusion-timesteps", type=int, default=1000,
+                   help="(method=diffusion only) Number of timesteps in the noise "
+                        "schedule. Standard 1000.")
+    p.add_argument("--prediction-type", default="eps", choices=["eps", "v"],
+                   help="(method=diffusion only) eps-prediction (legacy default) or "
+                        "v-prediction (Salimans+Ho; better at high noise, more flow-like).")
     p.add_argument("--flow-sigma-noise", type=float, default=0.05,
-                   help="Off-path Gaussian noise σ added to x_t during training. Higher σ = "
-                        "more stochasticity → less MSE-blur, but inference must also start "
-                        "from source+σ*noise to match the training distribution.")
+                   help="(method=flow only) Off-path Gaussian noise sigma added to x_t "
+                        "during training. Higher sigma = more stochasticity, less MSE-blur, "
+                        "but inference must also start from source+sigma*noise to match.")
     p.add_argument("--grad-clip-norm", type=float, default=1.0)
     # lpips
     p.add_argument("--lpips-weight", type=float, default=0.2,
@@ -551,15 +562,27 @@ def parse_args():
 # Val helpers
 # ---------------------------------------------------------------------------
 
-def _sample_from_source(ema_model, diffusion, source, sample_steps, device):
-    """Single Euler-ODE rollout. Helper to avoid duplicating the loop."""
-    ts = torch.linspace(0.0, 1.0, sample_steps + 1, device=device)
-    x = source.clone()
-    for j in range(sample_steps):
-        t_cur = ts[j].expand(source.shape[0])
-        v = ema_model(source, x, diffusion._scale_t(t_cur))
-        x = x + float(ts[j + 1] - ts[j]) * v
-    return x.clamp(0, 1)
+def _sample_from_source(ema_model, diffusion, source, sample_steps, device, method="flow"):
+    """Single rollout. Dispatches on method:
+    - flow: Euler-ODE from x=source over t in [0,1]
+    - diffusion: DDIM from x=randn over the model's full diffusion schedule
+    """
+    if method == "flow":
+        ts = torch.linspace(0.0, 1.0, sample_steps + 1, device=device)
+        x = source.clone()
+        for j in range(sample_steps):
+            t_cur = ts[j].expand(source.shape[0])
+            v = ema_model(source, x, diffusion._scale_t(t_cur))
+            x = x + float(ts[j + 1] - ts[j]) * v
+        return x.clamp(0, 1)
+    # diffusion: GaussianImageDiffusion.sample handles DDIM internally and
+    # starts from N(0, I); source is passed as conditioning.
+    H = source.shape[-1]
+    ch = source.shape[1]
+    out, _ = diffusion.sample(
+        ema_model, source, image_size=H, channels=ch, sample_steps=sample_steps,
+    )
+    return out.clamp(0, 1)
 
 
 @torch.no_grad()
@@ -583,7 +606,7 @@ def run_val(ema_model, diffusion, val_loader, args, device, step, outdir, wandb)
         target = batch["target"].to(device)
 
         # Clean source → output
-        samples_clean = _sample_from_source(ema_model, diffusion, source, args.sample_steps, device)
+        samples_clean = _sample_from_source(ema_model, diffusion, source, args.sample_steps, device, method=args.method)
         m_clean = metrics_fn.compute(samples_clean, target)
         lpips_clean.append(m_clean["lpips_squeeze"])
         ssim_clean.append(m_clean["ssim"])
@@ -592,7 +615,7 @@ def run_val(ema_model, diffusion, val_loader, args, device, step, outdir, wandb)
         # task being measured is "given a degraded source, can we still
         # reconstruct the clean target?")
         source_corr = val_corrupt(source)
-        samples_corr = _sample_from_source(ema_model, diffusion, source_corr, args.sample_steps, device)
+        samples_corr = _sample_from_source(ema_model, diffusion, source_corr, args.sample_steps, device, method=args.method)
         m_corr = metrics_fn.compute(samples_corr, target)
         lpips_corr.append(m_corr["lpips_squeeze"])
         ssim_corr.append(m_corr["ssim"])
@@ -667,15 +690,9 @@ def save_panel(ema_model, diffusion, val_loader, args, device, step, outdir):
     batch = next(iter(val_loader))
     source = batch["source"].to(device)[:4]
     target = batch["target"].to(device)[:4]
-
-    ts = torch.linspace(0.0, 1.0, args.sample_steps + 1, device=device)
-    x = source.clone()
-    for j in range(args.sample_steps):
-        t_cur = ts[j].expand(source.shape[0])
-        v = ema_model(source, x, diffusion._scale_t(t_cur))
-        x = x + float(ts[j + 1] - ts[j]) * v
-    samples = x.clamp(0, 1)
-
+    samples = _sample_from_source(
+        ema_model, diffusion, source, args.sample_steps, device, method=args.method,
+    )
     fp = (args.exp_name + "_") if args.exp_name else ""
     save_val_panel(source.cpu(), target.cpu(), samples.cpu(), samples.cpu(),
                    outdir / f"{fp}panel_step_{step:06d}.png")
@@ -689,15 +706,9 @@ def save_face_panel(ema_model, diffusion, panel_batch, args, step, outdir):
     ema_model.eval()
     source = panel_batch["source"]
     target = panel_batch["target"]
-
-    ts = torch.linspace(0.0, 1.0, args.sample_steps + 1, device=source.device)
-    x = source.clone()
-    for j in range(args.sample_steps):
-        t_cur = ts[j].expand(source.shape[0])
-        v = ema_model(source, x, diffusion._scale_t(t_cur))
-        x = x + float(ts[j + 1] - ts[j]) * v
-    samples = x.clamp(0, 1)
-
+    samples = _sample_from_source(
+        ema_model, diffusion, source, args.sample_steps, source.device, method=args.method,
+    )
     fp = (args.exp_name + "_") if args.exp_name else ""
     save_val_panel(source.cpu(), target.cpu(), samples.cpu(), samples.cpu(),
                    outdir / f"{fp}face_panel_step_{step:06d}.png")
@@ -722,13 +733,9 @@ def infer_nat1(ema_model, diffusion, args, device, step, outdir):
         source = frame_t.unsqueeze(0).to(device)
 
         ema_model.eval()
-        ts = torch.linspace(0.0, 1.0, args.sample_steps + 1, device=device)
-        x = source.clone()
-        for j in range(args.sample_steps):
-            t_cur = ts[j].expand(1)
-            v = ema_model(source, x, diffusion._scale_t(t_cur))
-            x = x + float(ts[j + 1] - ts[j]) * v
-        result = x.clamp(0, 1)
+        result = _sample_from_source(
+            ema_model, diffusion, source, args.sample_steps, device, method=args.method,
+        )
 
         grid = torch.cat([source.cpu(), result.cpu()], dim=3)
         fp = (args.exp_name + "_") if args.exp_name else ""
@@ -738,7 +745,7 @@ def infer_nat1(ema_model, diffusion, args, device, step, outdir):
         print(f"[warn] nat1 inference failed: {e}")
 
 
-def save_checkpoint(model, ema, flow_cfg, args, step, path):
+def save_checkpoint(model, ema, method_cfg, args, step, path):
     # The UNet constructor takes architecture flags that this script hardcodes
     # (rather than exposing via CLI). Save them explicitly so validate.py and
     # downstream loaders don't have to infer them from state_dict shapes.
@@ -747,14 +754,18 @@ def save_checkpoint(model, ema, flow_cfg, args, step, path):
     config.setdefault("no_source_encoder", True)   # use_source_encoder = not no_source_encoder
     config.setdefault("upsample_type", "resize_conv")
     config.setdefault("image_size", 512)            # construction-time size (model handles any input)
-    torch.save({
+    payload = {
         "step": step,
         "model": model.state_dict(),
         "ema_model": ema.model.state_dict(),
         "config": config,
-        "method": "flow",
-        "flow": flow_cfg.__dict__,
-    }, path)
+        "method": args.method,
+    }
+    if args.method == "flow":
+        payload["flow"] = method_cfg.__dict__
+    else:
+        payload["diffusion"] = method_cfg.__dict__
+    torch.save(payload, path)
 
 
 # ---------------------------------------------------------------------------
@@ -839,9 +850,20 @@ def main():
         [p for p in model.parameters() if p.requires_grad], lr=args.lr, weight_decay=1e-4
     )
 
-    flow_cfg = FlowConfig(timesteps=1000, sigma_noise=args.flow_sigma_noise, method="flow")
-    diffusion = RectifiedImageFlow(flow_cfg, device)
-    print(f"flow_cfg={flow_cfg.__dict__}")
+    # Build the training method object. `diffusion` is the legacy var name
+    # (predates the flow rewrite); it now holds either a flow or diffusion
+    # instance, kept identical-shaped 8-tuple training_loss return so the
+    # downstream loop doesn't need to branch on method.
+    if args.method == "flow":
+        method_cfg = FlowConfig(timesteps=1000, sigma_noise=args.flow_sigma_noise, method="flow")
+        diffusion = RectifiedImageFlow(method_cfg, device)
+    else:
+        method_cfg = DiffusionConfig(
+            timesteps=args.diffusion_timesteps,
+            prediction_type=args.prediction_type,
+        )
+        diffusion = GaussianImageDiffusion(method_cfg, device)
+    print(f"method={args.method}  method_cfg={method_cfg.__dict__}")
 
     aux_lpips = LearnedPerceptualImagePatchSimilarity(
         net_type=args.lpips_aux_net, normalize=True
@@ -966,12 +988,15 @@ def main():
 
         optimizer.zero_grad(set_to_none=True)
         with autocast_ctx:
-            loss, t, x_t, _noise, _model_out, x0_hat, flow_loss, lpips_loss = diffusion.training_loss(
-                model, source, target,
+            loss_kwargs = dict(
                 aux_lpips=aux_lpips, aux_lpips_weight=lpips_w,
-                contrastive_source_weight=args.contrastive_source_weight,
-                contrastive_source_margin=args.contrastive_source_margin,
                 source_dropout=args.source_dropout,
+            )
+            if args.method == "flow":
+                loss_kwargs["contrastive_source_weight"] = args.contrastive_source_weight
+                loss_kwargs["contrastive_source_margin"] = args.contrastive_source_margin
+            loss, t, x_t, _noise, _model_out, x0_hat, flow_loss, lpips_loss = diffusion.training_loss(
+                model, source, target, **loss_kwargs,
             )
             # Optional VGG feature/style loss on the model's target prediction.
             if style_loss_fn is not None:
@@ -1034,7 +1059,7 @@ def main():
         fp = (args.exp_name + "_") if args.exp_name else ""
         if step % args.checkpoint_every == 0:
             ckpt_path = outdir / f"{fp}model_step_{step:06d}.pt"
-            save_checkpoint(model, ema, flow_cfg, args, step, ckpt_path)
+            save_checkpoint(model, ema, method_cfg, args, step, ckpt_path)
             print(f"[ckpt] saved {ckpt_path}")
 
         if step % args.val_every == 0 or step % args.best_every == 0:
@@ -1044,7 +1069,7 @@ def main():
             if val_lpips < best_lpips:
                 best_lpips = val_lpips
                 best_path = outdir / f"{fp}model_best.pt"
-                save_checkpoint(model, ema, flow_cfg, args, step, best_path)
+                save_checkpoint(model, ema, method_cfg, args, step, best_path)
                 print(f"[best] new best lpips_sq={best_lpips:.4f}  saved {best_path}")
                 if wandb is not None:
                     wandb.log({"val/best_lpips_sq": best_lpips}, step=step)
@@ -1056,7 +1081,7 @@ def main():
     # Final save
     fp = (args.exp_name + "_") if args.exp_name else ""
     final_path = outdir / f"{fp}model.pt"
-    save_checkpoint(model, ema, flow_cfg, args, args.steps, final_path)
+    save_checkpoint(model, ema, method_cfg, args, args.steps, final_path)
     print(f"[done] saved {final_path}  best_lpips_sq={best_lpips:.4f}")
     if wandb is not None:
         wandb.finish()

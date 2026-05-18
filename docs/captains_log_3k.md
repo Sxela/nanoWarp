@@ -280,6 +280,62 @@ Outdir: `out/exp53_lanczos_at_exp50_recipe_noenc_attn163264_bf16_mc88_256px_20k`
 
 ---
 
+## exp54 — diffusion (eps) re-test at exp50 recipe
+
+**Status: WIRED 2026-05-18**
+
+Re-running the experiment that "doomed" classical Gaussian diffusion in
+the legacy era — but with every known confounder fixed. exp01-exp06
+used eps-prediction diffusion with a ResNet18 source encoder, default
+UNet, 1k synth dataset, ~2k training steps. DDIM reverse-sampling
+collapsed; we switched to flow matching at exp07 and never looked back.
+
+**Honest re-test setup**: same trainer as exp50 (`train_exp32_prog512.py`,
+just extended to support `--method diffusion`), same exp35 arch
+(decoder_attn + source_pyramid + FiLM), same 3k mixed dataset, same
+recipe (minimal aug, constant LPIPS=0.2), same 20k @ 256px bs=4. Only
+delta: `--method diffusion --prediction-type eps --diffusion-timesteps 1000`.
+
+The trainer changes (back-compat: `--method flow` is default and exp50/52
+reproduce bit-identical):
+- `_sample_from_source` dispatches on method (flow=Euler ODE; diffusion=DDIM).
+- `save_panel`/`save_face_panel`/`infer_nat1` now route through the helper.
+- `save_checkpoint` writes `method=diffusion` + `diffusion=cfg.__dict__`.
+- Training loss call filters out flow-only kwargs (contrastive_*) when
+  method=diffusion. Both modules return the same 8-tuple shape.
+
+**Hypothesis tree**:
+
+1. Diffusion catches up to flow (within ±5% on face_lpips_sq):
+   → flow's edge in the legacy era was a confounder, not method.
+   → Method choice becomes a smaller lever; could revisit v-prediction,
+     hybrid schedules, etc.
+
+2. Diffusion still much worse (10%+ regression):
+   → flow's edge is real at this model size / data scale.
+   → Already controlled for sample_steps: in-loop val uses 20 DDIM
+     steps (matches exp50 for speed) but final val uses **100** DDIM
+     steps (diffusion's native sweet spot). If it still loses at 100,
+     the gap isn't a stepcount artifact.
+
+3. Diffusion is *better* (unlikely but possible if eps loss is a less
+   blurry MSE signal than v-target):
+   → flow assumption needs reconsidering; promote to 80k.
+
+```bash
+WANDB_API_KEY=... bash scripts/run_exp54_diffusion_at_exp50_recipe.sh
+```
+
+Script: `scripts/run_exp54_diffusion_at_exp50_recipe.sh`
+Outdir: `out/exp54_diffusion_eps_at_exp50_recipe_noenc_attn163264_bf16_mc88_256px_20k`
+
+A/B target — exp50 (flow):
+- val_portraits face_lpips_sq=0.124, face_lpips_vgg=0.285, face_ssim=0.544
+- val_portraits whole lpips_sq=0.170, whole ssim=0.444
+- legacy val face_lpips_sq=0.201, face_ssim=0.605
+
+---
+
 ## Open follow-ups (3k era, updated 2026-05-18)
 - **More diverse real-photo sources**: Unsplash people, Places365
   with people-filter, AFW/IJB-C in-the-wild faces. Currently FFHQ
