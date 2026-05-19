@@ -81,3 +81,58 @@ class FiLM(nn.Module):
     def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         scale, shift = self.proj(cond).chunk(2, dim=1)
         return x * (1.0 + scale) + shift
+
+
+class CrossAttnCond(nn.Module):
+    """Cross-attention conditioning: target attends to source-pyramid features.
+
+    Complements FiLM (per-channel γ,β) with token-level interaction: every
+    spatial position in the decoder can attend to every position in the
+    pyramid feature at the same resolution. Lets the model pull source
+    information from non-local positions (e.g. a far-away facial landmark)
+    instead of being limited to per-channel scaling at the local conv
+    receptive field.
+
+    Q from target (B, target_ch, H, W). K, V from cond (B, cond_ch, H, W).
+    Multi-head SDPA, residual addition. Output projection is zero-init so
+    the block is identity at init time — safe insertion alongside existing
+    FiLM modulation; older checkpoints (no cross-attn) load via auto-detect
+    in ckpt.py.
+
+    Compute: quadratic in spatial size. Practical at H*W <= 4096 (e.g. 64×64
+    @ 256px input, deepest non-bottleneck decoder level).
+    """
+
+    def __init__(self, target_ch: int, cond_ch: int, num_heads: int = 4,
+                 head_dim: int | None = None):
+        super().__init__()
+        if head_dim is None:
+            head_dim = max(16, target_ch // num_heads)
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.inner_dim = num_heads * head_dim
+        self.norm_q = nn.GroupNorm(8, target_ch)
+        self.norm_kv = nn.GroupNorm(8, cond_ch)
+        self.to_q = nn.Conv2d(target_ch, self.inner_dim, 1, bias=False)
+        self.to_k = nn.Conv2d(cond_ch, self.inner_dim, 1, bias=False)
+        self.to_v = nn.Conv2d(cond_ch, self.inner_dim, 1, bias=False)
+        self.proj_out = nn.Conv2d(self.inner_dim, target_ch, 1)
+        # Zero-init output proj so the block is identity at insertion time.
+        nn.init.zeros_(self.proj_out.weight)
+        nn.init.zeros_(self.proj_out.bias)
+
+    def forward(self, target: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = target.shape
+        q = self.to_q(self.norm_q(target))
+        kv_n = self.norm_kv(cond)
+        k = self.to_k(kv_n)
+        v = self.to_v(kv_n)
+        # Reshape (B, inner_dim, H, W) -> (B, num_heads, H*W, head_dim).
+        def _reshape_heads(x: torch.Tensor) -> torch.Tensor:
+            return x.view(B, self.num_heads, self.head_dim, H * W).transpose(2, 3).contiguous()
+        q = _reshape_heads(q)
+        k = _reshape_heads(k)
+        v = _reshape_heads(v)
+        out = F.scaled_dot_product_attention(q, k, v)  # (B, heads, N, head_dim)
+        out = out.transpose(2, 3).reshape(B, self.inner_dim, H, W)
+        return target + self.proj_out(out)

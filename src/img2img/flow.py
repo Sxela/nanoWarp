@@ -35,6 +35,13 @@ class FlowConfig:
     timesteps: int = 1000  # nominal scale used only to drive the existing time embedding
     sigma_noise: float = 0.0  # optional off-path Gaussian noise added to the interpolant
     method: str = "flow"  # serialization tag distinguishing this from "diffusion"
+    # Training-time t-sampling. "uniform" = legacy default (t ~ U[0,1]).
+    # "logit_normal" = SD3 / EDM-style; t = sigmoid(N(mu, sigma)), peaked at
+    # 0.5, biases training toward the hard middle of the path. mu shifts the
+    # peak (>0 → toward t=1, <0 → toward t=0); sigma widens it.
+    t_sample_mode: str = "uniform"
+    t_sample_mu: float = 0.0
+    t_sample_sigma: float = 1.0
 
 
 class RectifiedImageFlow:
@@ -115,7 +122,14 @@ class RectifiedImageFlow:
     ):
         b = target.shape[0]
         t_low_c, t_high_c = self._t_range_continuous(t_low, t_high)
-        t_cont = torch.rand(b, device=target.device) * (t_high_c - t_low_c) + t_low_c
+        if self.config.t_sample_mode == "logit_normal":
+            # SD3-style: t = sigmoid(N(mu, sigma)). Naturally lives in (0, 1),
+            # peaked at sigmoid(mu)=0.5 when mu=0. Clamp to the configured
+            # range to honor t_low/t_high constraints.
+            u = torch.randn(b, device=target.device) * self.config.t_sample_sigma + self.config.t_sample_mu
+            t_cont = torch.sigmoid(u).clamp(t_low_c, t_high_c)
+        else:
+            t_cont = torch.rand(b, device=target.device) * (t_high_c - t_low_c) + t_low_c
 
         x_t, noise = self.q_sample(source, target, t_cont)
         source_in = self._apply_source_dropout(source, source_dropout)

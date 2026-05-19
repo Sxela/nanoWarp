@@ -113,6 +113,7 @@ def _build_unet(cfg, sd, device, verbose):
     use_decoder_attn = any(k.startswith("attn_dec") for k in sd.keys())
     use_source_pyramid = any(k.startswith("source_pyramid.") for k in sd.keys())
     use_dit_bottleneck = any(k.startswith("dit_bottleneck.") for k in sd.keys())
+    use_cross_attn_cond = any(k.startswith("cross_attn_dec4.") for k in sd.keys())
     num_dit_blocks = max(
         (int(k.split(".")[2]) + 1 for k in sd.keys()
          if k.startswith("dit_bottleneck.blocks.")),
@@ -124,6 +125,7 @@ def _build_unet(cfg, sd, device, verbose):
               f"image_size={image_size}  source_in_stem={source_in_stem}  "
               f"use_source_encoder={use_source_encoder}  "
               f"decoder_attn={use_decoder_attn}  pyramid={use_source_pyramid}  "
+              f"cross_attn={use_cross_attn_cond}  "
               f"dit={use_dit_bottleneck}({num_dit_blocks} blk)")
 
     return Img2ImgDiffusionUNet(
@@ -139,4 +141,5 @@ def _build_unet(cfg, sd, device, verbose):
         use_source_pyramid=use_source_pyramid,
         use_dit_bottleneck=use_dit_bottleneck,
         num_dit_blocks=num_dit_blocks,
+        use_cross_attn_cond=use_cross_attn_cond,
     ).to(device)

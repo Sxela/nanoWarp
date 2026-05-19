@@ -52,7 +52,14 @@ Established 2026-05-16. Old runs validated retroactively on this split.
 | **exp52 (80k)** | **3k mixed** | exp35 arch | **0.101** | **0.244** | **0.579** | **0.145** | **0.459** | +0.045 |
 | exp53 (20k) | 3k mixed | exp35 arch + LANCZOS resize | 0.124 | 0.289 | 0.521 | 0.164 | 0.423 | +0.039 |
 | exp54 (20k) | 3k mixed | exp35 arch + diffusion-eps (vs flow) | 0.508 | 0.760 | 0.370 | 0.514 | 0.368 | +0.047 |
-| exp55 (20k) | 3k mixed | exp35 arch + diffusion-eps + lpips=0 | TBD | TBD | TBD | TBD | TBD | TBD |
+| exp55 (20k) | 3k mixed | exp35 arch + diffusion-eps + lpips=0 | 0.725 | 0.795 | 0.398 | 0.707 | 0.413 | +0.032 |
+| **exp56 (80k)** | **3k mixed** | exp35 arch + mid aug (head pose, mild corrupt) | 0.104 | **0.244** | 0.577 | 0.148 | 0.460 | **+0.027** |
+| exp57 (20k) | 3k mixed | exp35 arch + source-dropout=0.2 (no CFG) | 0.124 | 0.290 | 0.550 | 0.172 | 0.457 | +0.034 |
+| exp58 (20k) | 3k mixed | exp35 arch + logit-normal t (sigma=1.0, endpoints 25x starved) | 0.179 | 0.368 | 0.436 | 0.210 | 0.386 | +0.041 |
+| exp58b (20k) | 3k mixed | exp35 arch + logit-normal t (sigma=1.5) | 0.136 | 0.309 | 0.507 | 0.182 | 0.422 | +0.037 |
+| **exp59 (20k)** | **3k mixed** | exp35 arch + cross-attn cond @ H/8 (+500k params) | **0.122** | 0.282 | 0.546 | 0.166 | 0.445 | **+0.035** |
+| exp60 (80k) | 3k mixed | exp35 arch + cross-attn (80k promotion of exp59) | TBD | TBD | TBD | TBD | TBD | TBD |
+| exp61 (80k) | 3k mixed | exp35 arch + cross-attn + mid aug (STACK exp56+exp59) | TBD | TBD | TBD | TBD | TBD | TBD |
 
 ## Cross-domain val (FFHQ-only-trained on legacy val)
 

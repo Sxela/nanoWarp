@@ -408,6 +408,11 @@ def parse_args():
     p.add_argument("--use-source-pyramid", action="store_true",
                    help="Enable in-model SourcePyramid + FiLM modulation of the decoder. "
                         "~2.4M extra params at mc=88. Zero-init FiLM → identity at init.")
+    p.add_argument("--use-cross-attn-cond", action="store_true",
+                   help="Add cross-attention conditioning at the H/8 decoder level "
+                        "(source pyramid feature as KV, decoder activation as Q). Adds "
+                        "~620k params. Requires --use-source-pyramid. Zero-init output "
+                        "proj -> identity at init; auto-detected from state_dict in ckpt.py.")
     p.add_argument("--use-decoder-attn", action="store_true",
                    help="Mirror encoder attn on the decoder side: BottleneckAttention "
                         "at the same resolutions (attn_resolutions) operating on decoder "
@@ -451,6 +456,16 @@ def parse_args():
                    help="(method=flow only) Off-path Gaussian noise sigma added to x_t "
                         "during training. Higher sigma = more stochasticity, less MSE-blur, "
                         "but inference must also start from source+sigma*noise to match.")
+    p.add_argument("--t-sample-mode", default="uniform", choices=["uniform", "logit_normal"],
+                   help="(method=flow only) Training-time t sampling. 'uniform' = U[0,1] "
+                        "(legacy default). 'logit_normal' = SD3/EDM-style: t=sigmoid(N(mu,sigma)), "
+                        "peaked at 0.5, biases training toward the hard middle of the path.")
+    p.add_argument("--t-sample-mu", type=float, default=0.0,
+                   help="(method=flow, t_sample_mode=logit_normal) Mean of the underlying normal. "
+                        "0 -> peak at t=0.5; >0 -> peak shifts toward t=1; <0 -> toward t=0.")
+    p.add_argument("--t-sample-sigma", type=float, default=1.0,
+                   help="(method=flow, t_sample_mode=logit_normal) Std of the underlying normal. "
+                        "Smaller -> sharper peak at sigmoid(mu); larger -> closer to uniform.")
     p.add_argument("--grad-clip-norm", type=float, default=1.0)
     # lpips
     p.add_argument("--lpips-weight", type=float, default=0.2,
@@ -839,6 +854,7 @@ def main():
             use_dit_bottleneck=args.use_dit_bottleneck,
             num_dit_blocks=args.num_dit_blocks,
             dit_mlp_ratio=args.dit_mlp_ratio,
+            use_cross_attn_cond=args.use_cross_attn_cond,
         ).to(device)
 
     total = sum(p.numel() for p in model.parameters())
@@ -855,7 +871,12 @@ def main():
     # instance, kept identical-shaped 8-tuple training_loss return so the
     # downstream loop doesn't need to branch on method.
     if args.method == "flow":
-        method_cfg = FlowConfig(timesteps=1000, sigma_noise=args.flow_sigma_noise, method="flow")
+        method_cfg = FlowConfig(
+            timesteps=1000, sigma_noise=args.flow_sigma_noise, method="flow",
+            t_sample_mode=args.t_sample_mode,
+            t_sample_mu=args.t_sample_mu,
+            t_sample_sigma=args.t_sample_sigma,
+        )
         diffusion = RectifiedImageFlow(method_cfg, device)
     else:
         method_cfg = DiffusionConfig(

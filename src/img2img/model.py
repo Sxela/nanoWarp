@@ -10,7 +10,7 @@ from torch.hub import load_state_dict_from_url
 
 from .colorspace import linear_to_srgb
 from .dit import DiTBottleneck
-from .source_pyramid import FiLM, SourcePyramid
+from .source_pyramid import CrossAttnCond, FiLM, SourcePyramid
 from .temporal import TemporalAttn
 
 
@@ -275,6 +275,7 @@ class Img2ImgDiffusionUNet(nn.Module):
         use_dit_bottleneck: bool = False,
         num_dit_blocks: int = 4,
         dit_mlp_ratio: float = 4.0,
+        use_cross_attn_cond: bool = False,
     ):
         super().__init__()
         if upsample_type not in ("resize_conv", "pixel_shuffle"):
@@ -457,8 +458,18 @@ class Img2ImgDiffusionUNet(nn.Module):
             self.film_dec3 = FiLM(cond_ch=c3, target_ch=c3)   # H/4
             self.film_dec2 = FiLM(cond_ch=c2, target_ch=c2)   # H/2
             self.film_dec1 = FiLM(cond_ch=c1, target_ch=c1)   # H
+            # Optional cross-attn at H/8 decoder level (deepest non-bottleneck
+            # level where pyramid feature is available). Token count at 256px
+            # input = 32*32 = 1024 — practical. Identity-at-init via zero-init
+            # output proj in CrossAttnCond, so this is safe to insert alongside
+            # FiLM; older checkpoints (no cross-attn) auto-detect in ckpt.py.
+            if use_cross_attn_cond:
+                self.cross_attn_dec4 = CrossAttnCond(target_ch=c3, cond_ch=c4)
+            else:
+                self.cross_attn_dec4 = None
         else:
             self.source_pyramid = None
+            self.cross_attn_dec4 = None
             self.film_dec4 = None
             self.film_dec3 = None
             self.film_dec2 = None
@@ -566,6 +577,8 @@ class Img2ImgDiffusionUNet(nn.Module):
         x = self.dec4(torch.cat([x, h4], dim=1), t_emb)
         if self.attn_dec4 is not None: x = self.attn_dec4(x)
         x = _film(x, self.film_dec4, 3)   # H/8 source feat
+        if self.cross_attn_dec4 is not None and pyr_feats is not None:
+            x = self.cross_attn_dec4(x, pyr_feats[3])
         x = _ta(x, self.tattn_dec4)
         x = self.up3(x)
         x = self.dec3(torch.cat([x, h3], dim=1), t_emb)
