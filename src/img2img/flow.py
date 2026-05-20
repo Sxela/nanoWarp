@@ -42,6 +42,10 @@ class FlowConfig:
     t_sample_mode: str = "uniform"
     t_sample_mu: float = 0.0
     t_sample_sigma: float = 1.0
+    # Prediction target. "v" (default) = velocity v=target-source.
+    # "x0" = predict the clean target x_1 directly (DDIM-style). At inference,
+    # v_hat is recovered as (x0_hat - x_t) / (1 - t).
+    prediction_type: str = "v"
 
 
 class RectifiedImageFlow:
@@ -134,11 +138,21 @@ class RectifiedImageFlow:
         x_t, noise = self.q_sample(source, target, t_cont)
         source_in = self._apply_source_dropout(source, source_dropout)
         t_emb_in = self._scale_t(t_cont)
-        v_hat = model(source_in, x_t, t_emb_in)
+        model_out = model(source_in, x_t, t_emb_in)
 
-        v_target = target - source
-        flow_loss = F.mse_loss(v_hat, v_target)
-        x_target_hat = self.predict_target_from_v(x_t, t_cont, v_hat)
+        if self.config.prediction_type == "x0":
+            # Model output is x_target_hat directly; loss is MSE against target.
+            # v_hat (for downstream code path / aux LPIPS) is derived from x0_hat.
+            x_target_hat = model_out.clamp(0.0, 1.0)
+            flow_loss = F.mse_loss(model_out, target)
+            # Recover v_hat for tuple shape parity (not used directly downstream
+            # since flow_loss is computed against target, not v_target).
+            v_hat = model_out  # placeholder, semantics differ
+        else:
+            v_hat = model_out
+            v_target = target - source
+            flow_loss = F.mse_loss(v_hat, v_target)
+            x_target_hat = self.predict_target_from_v(x_t, t_cont, v_hat)
 
         lpips_loss = torch.tensor(0.0, device=target.device)
         loss = flow_loss
@@ -177,8 +191,17 @@ class RectifiedImageFlow:
         sample_steps: int | None = None,
         log_every: int | None = None,
         cfg_scale: float = 1.0,
+        sampler: str = "euler",
     ):
-        """Euler integration from x=source at t=0 to x≈target at t=1.
+        """ODE integration from x=source at t=0 to x≈target at t=1.
+
+        sampler:
+          - "euler": x_{n+1} = x_n + dt * v(x_n, t_n)             [1 NFE/step]
+          - "heun":  predictor-corrector 2nd-order Heun method:
+              x_pred = x_n + dt * v(x_n, t_n)
+              x_{n+1} = x_n + dt * (v(x_n, t_n) + v(x_pred, t_{n+1})) / 2  [2 NFE/step]
+            Higher accuracy at same step count; or equivalent quality at ~half
+            the steps. Last step uses Euler (no t_{n+1} to evaluate at).
 
         `image_size` and `channels` are accepted for interface parity with
         GaussianImageDiffusion.sample but ignored: x is initialised from source.
@@ -186,35 +209,49 @@ class RectifiedImageFlow:
         del image_size, channels
         if sample_steps is None or sample_steps <= 0:
             sample_steps = 10
+        if sampler not in ("euler", "heun"):
+            raise ValueError(f"sampler must be 'euler' or 'heun', got {sampler!r}")
 
         b = source.shape[0]
-        # Match the training-time x_t distribution: at t=0 training samples are
-        # `source + sigma * noise`, so inference must start from the same.
-        # Negligible at sigma_noise=0.05 (legacy), important at larger σ.
         x = source.clone()
         if self.config.sigma_noise > 0:
             x = x + self.config.sigma_noise * torch.randn_like(x)
         ts = torch.linspace(0.0, 1.0, sample_steps + 1, device=self.device)
         frames: list[torch.Tensor] = []
 
-        # CFG: at cfg_scale != 1, also do an unconditioned pass (source=zeros,
-        # matching training-time source_dropout) and combine:
-        #   v = v_uncond + cfg_scale * (v_cond - v_uncond)
-        # cfg_scale=1 → conditioned only (default, no extra cost).
         use_cfg = cfg_scale != 1.0
         zero_source = torch.zeros_like(source) if use_cfg else None
 
-        for i in range(sample_steps):
-            t_cur = ts[i].expand(b)
-            dt = float(ts[i + 1] - ts[i])
-            t_emb_in = self._scale_t(t_cur)
-            v_cond = model(source, x, t_emb_in)
+        def velocity(x_in, t_scalar):
+            t_emb_in = self._scale_t(t_scalar.expand(b))
+            out_cond = model(source, x_in, t_emb_in)
             if use_cfg:
-                v_uncond = model(zero_source, x, t_emb_in)
-                v_hat = v_uncond + cfg_scale * (v_cond - v_uncond)
+                out_uncond = model(zero_source, x_in, t_emb_in)
+                out = out_uncond + cfg_scale * (out_cond - out_uncond)
             else:
-                v_hat = v_cond
-            x = x + dt * v_hat
+                out = out_cond
+            # If model predicts x0 directly, recover v_hat for the Euler/Heun
+            # update: v = (x0_hat - x_t) / max(1 - t, eps).
+            if self.config.prediction_type == "x0":
+                t_b = t_scalar.expand(b).view(-1, 1, 1, 1).float()
+                denom = (1.0 - t_b).clamp(min=1e-3)
+                return (out - x_in) / denom
+            return out
+
+        for i in range(sample_steps):
+            t_cur = ts[i]
+            t_next = ts[i + 1]
+            dt = float(t_next - t_cur)
+            v_hat = velocity(x, t_cur)
+            if sampler == "euler" or i == sample_steps - 1:
+                # Euler step; also fallback for the last step of Heun (no
+                # next-time point to evaluate at after t=1).
+                x = x + dt * v_hat
+            else:
+                # Heun 2nd-order: predictor + corrector.
+                x_pred = x + dt * v_hat
+                v_next = velocity(x_pred, t_next)
+                x = x + dt * 0.5 * (v_hat + v_next)
             if log_every is not None and (i % log_every == 0 or i == 0 or i == sample_steps - 1):
                 frames.append(x.detach().clamp(0, 1).cpu())
 

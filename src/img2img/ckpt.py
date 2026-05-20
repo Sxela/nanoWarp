@@ -115,6 +115,8 @@ def _build_unet(cfg, sd, device, verbose):
     use_dit_bottleneck = any(k.startswith("dit_bottleneck.") for k in sd.keys())
     use_cross_attn_cond = any(k.startswith("cross_attn_dec4.") for k in sd.keys())
     use_cross_attn_cond_h4 = any(k.startswith("cross_attn_dec3.") for k in sd.keys())
+    # AdaLN-Zero ResBlock: detect via adaln_proj_in/out linear weights.
+    use_adaln_time = any(".adaln_proj_in.weight" in k for k in sd.keys())
     num_dit_blocks = max(
         (int(k.split(".")[2]) + 1 for k in sd.keys()
          if k.startswith("dit_bottleneck.blocks.")),
@@ -127,6 +129,7 @@ def _build_unet(cfg, sd, device, verbose):
               f"use_source_encoder={use_source_encoder}  "
               f"decoder_attn={use_decoder_attn}  pyramid={use_source_pyramid}  "
               f"cross_attn={use_cross_attn_cond}+h4={use_cross_attn_cond_h4}  "
+              f"adaln_time={use_adaln_time}  "
               f"dit={use_dit_bottleneck}({num_dit_blocks} blk)")
 
     return Img2ImgDiffusionUNet(
@@ -144,4 +147,5 @@ def _build_unet(cfg, sd, device, verbose):
         num_dit_blocks=num_dit_blocks,
         use_cross_attn_cond=use_cross_attn_cond,
         use_cross_attn_cond_h4=use_cross_attn_cond_h4,
+        use_adaln_time=use_adaln_time,
     ).to(device)

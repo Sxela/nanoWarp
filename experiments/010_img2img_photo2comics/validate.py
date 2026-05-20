@@ -46,6 +46,10 @@ def parse_args():
     p.add_argument("--outdir", default="out/img2img_v1_val")
     p.add_argument("--use-ema", action="store_true")
     p.add_argument("--sample-steps", type=int, default=50)
+    p.add_argument("--sampler", default="euler", choices=["euler", "heun"],
+                   help="Flow ODE solver. 'euler' (default) = 1 NFE/step. "
+                        "'heun' = 2nd-order predictor-corrector, 2 NFE/step; better "
+                        "accuracy at same step count, or equivalent quality at ~half steps.")
     p.add_argument("--cfg-scale", type=float, default=1.0,
                    help="Classifier-free guidance scale. 1.0 = no CFG (default; single "
                         "forward per step). >1 → two forwards per step (conditioned + "
@@ -100,12 +104,13 @@ def main():
         return linear_to_srgb(x).clamp(0, 1) if color_space == "linear_rgb" else x
 
     def sample_kwargs(log_every):
-        # cfg_scale is a flow-only kwarg; GaussianImageDiffusion.sample
-        # doesn't accept it. Conditionally include it.
+        # cfg_scale and sampler are flow-only kwargs; GaussianImageDiffusion.sample
+        # doesn't accept them. Conditionally include them.
         kw = dict(image_size=args.image_size, sample_steps=args.sample_steps,
                   log_every=log_every)
         if method == "flow":
             kw["cfg_scale"] = args.cfg_scale
+            kw["sampler"] = args.sampler
         return kw
 
     losses = []

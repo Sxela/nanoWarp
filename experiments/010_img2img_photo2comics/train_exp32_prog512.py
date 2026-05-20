@@ -53,6 +53,8 @@ from torchvision.transforms.functional import InterpolationMode
 from src.img2img import EMA, Img2ImgDiffusionUNet, PixelDiT, resolve_resize_interp
 from src.img2img.flow import FlowConfig, RectifiedImageFlow
 from src.img2img.diffusion import DiffusionConfig, GaussianImageDiffusion
+from src.img2img.discriminator import PatchDiscriminator
+from src.img2img.gan_loss import hinge_d_loss, hinge_g_loss
 from src.img2img.render import save_val_panel
 from src.utils.config import apply_yaml_config
 
@@ -417,6 +419,35 @@ def parse_args():
                    help="Add a second cross-attention conditioning at the H/4 decoder "
                         "level (4x more tokens than H/8 -> ~16x SDPA compute, ~500k params). "
                         "Multi-scale source conditioning when paired with --use-cross-attn-cond.")
+    p.add_argument("--use-adaln-time", action="store_true",
+                   help="Use AdaLN-Zero time conditioning in every ResBlock (DiT/SD3 style) "
+                        "instead of the legacy additive time_proj. Replaces ResBlock with "
+                        "AdaLNResBlock; ~+0.5M params for the per-block modulation MLPs. "
+                        "Zero-init output gates -> identity at insertion time; auto-detected "
+                        "in ckpt.py via the presence of adaln_proj_in keys.")
+    # PatchGAN adversarial loss (exp63 family). Discriminator + alternating G/D
+    # update with adaptive switching (G updates when g_gan_ema >= d_loss_ema, D
+    # updates when d_loss_ema >= g_gan_ema). NoGAN pretrain phases not exposed
+    # here — assume --resume from a pretrained G (e.g. exp61 EMA).
+    p.add_argument("--use-gan", action="store_true",
+                   help="Add PatchGAN adversarial loss term. Requires --gan-weight > 0. "
+                        "Assumes G is pretrained via --resume; no NoGAN pretrain phasing.")
+    p.add_argument("--gan-weight", type=float, default=0.02,
+                   help="Adversarial loss weight on the G update. exp21's 0.005 was too weak; "
+                        "0.1 cratered (D dominated). 0.02 is the proposed retry middle ground.")
+    p.add_argument("--gan-d-channels", type=int, default=64,
+                   help="Base channels for the PatchGAN discriminator. 64 ≈ 2-3M params.")
+    p.add_argument("--gan-d-layers", type=int, default=3,
+                   help="Strided conv layers in the discriminator. 3 = pix2pix 70x70 PatchGAN.")
+    p.add_argument("--gan-d-lr", type=float, default=1e-4,
+                   help="Discriminator AdamW lr. Typically lower than G lr to keep balance.")
+    p.add_argument("--gan-d-beta1", type=float, default=0.5,
+                   help="AdamW beta1 for D. 0.5 is pix2pix / GAN convention.")
+    p.add_argument("--gan-adaptive-switch", action="store_true", default=True,
+                   help="Adaptive G/D alternation: G updates when g_gan_ema >= d_loss_ema; "
+                        "D updates when d_loss_ema >= g_gan_ema. Stabilizes training.")
+    p.add_argument("--gan-ema-alpha", type=float, default=0.1,
+                   help="EMA factor for the adaptive G/D switching tracker.")
     p.add_argument("--no-source-in-stem", action="store_true",
                    help="Drop the source channels from the input convolution. The model "
                         "still gets source signal via SourcePyramid + FiLM + cross-attn "
@@ -477,6 +508,11 @@ def parse_args():
     p.add_argument("--t-sample-sigma", type=float, default=1.0,
                    help="(method=flow, t_sample_mode=logit_normal) Std of the underlying normal. "
                         "Smaller -> sharper peak at sigmoid(mu); larger -> closer to uniform.")
+    p.add_argument("--flow-prediction-type", default="v", choices=["v", "x0"],
+                   help="(method=flow) Prediction parameterization. 'v' = velocity "
+                        "(target - source); the legacy default. 'x0' = predict the clean target "
+                        "directly (DDIM-style). x0 has uniform output scale across t; v does not. "
+                        "Inference recovers v = (x0_hat - x_t) / (1 - t).")
     p.add_argument("--grad-clip-norm", type=float, default=1.0)
     # lpips
     p.add_argument("--lpips-weight", type=float, default=0.2,
@@ -771,7 +807,7 @@ def infer_nat1(ema_model, diffusion, args, device, step, outdir):
         print(f"[warn] nat1 inference failed: {e}")
 
 
-def save_checkpoint(model, ema, method_cfg, args, step, path):
+def save_checkpoint(model, ema, method_cfg, args, step, path, discriminator=None):
     # The UNet constructor takes architecture flags that this script hardcodes
     # (rather than exposing via CLI). Save them explicitly so validate.py and
     # downstream loaders don't have to infer them from state_dict shapes.
@@ -795,6 +831,8 @@ def save_checkpoint(model, ema, method_cfg, args, step, path):
         payload["flow"] = method_cfg.__dict__
     else:
         payload["diffusion"] = method_cfg.__dict__
+    if discriminator is not None:
+        payload["discriminator"] = discriminator.state_dict()
     torch.save(payload, path)
 
 
@@ -871,6 +909,7 @@ def main():
             dit_mlp_ratio=args.dit_mlp_ratio,
             use_cross_attn_cond=args.use_cross_attn_cond,
             use_cross_attn_cond_h4=args.use_cross_attn_cond_h4,
+            use_adaln_time=args.use_adaln_time,
         ).to(device)
 
     total = sum(p.numel() for p in model.parameters())
@@ -892,6 +931,7 @@ def main():
             t_sample_mode=args.t_sample_mode,
             t_sample_mu=args.t_sample_mu,
             t_sample_sigma=args.t_sample_sigma,
+            prediction_type=args.flow_prediction_type,
         )
         diffusion = RectifiedImageFlow(method_cfg, device)
     else:
@@ -908,6 +948,27 @@ def main():
     for p in aux_lpips.parameters():
         p.requires_grad_(False)
     print(f"lpips_aux_net={args.lpips_aux_net} weight={args.lpips_weight}")
+
+    # Optional PatchGAN discriminator + AdamW. Built only if --use-gan; loaded
+    # from --resume checkpoint if present there. Conditioned on source (cat
+    # source + prediction along channel dim → PatchDiscriminator).
+    discriminator = None
+    opt_d = None
+    _g_gan_ema = 0.0  # EMA tracker for adaptive G/D switching
+    _d_loss_ema = 0.0
+    if args.use_gan and args.gan_weight > 0:
+        discriminator = PatchDiscriminator(
+            in_channels=6,  # source (3) + pred (3) concat
+            base_channels=args.gan_d_channels,
+            n_layers=args.gan_d_layers,
+        ).to(device)
+        opt_d = torch.optim.AdamW(
+            discriminator.parameters(), lr=args.gan_d_lr, betas=(args.gan_d_beta1, 0.999)
+        )
+        d_params = sum(p.numel() for p in discriminator.parameters())
+        print(f"discriminator PatchGAN ch={args.gan_d_channels} layers={args.gan_d_layers}  "
+              f"params={d_params:,}  d_lr={args.gan_d_lr}  beta1={args.gan_d_beta1}  "
+              f"gan_weight={args.gan_weight}  adaptive_switch={args.gan_adaptive_switch}")
 
     # Optional VGG style / content loss (Gram-matrix style transfer, Gatys/Johnson).
     # Used to push outputs toward target *texture statistics* independent of
@@ -984,8 +1045,23 @@ def main():
         model.load_state_dict(rckpt["model"])
         if "ema_model" in rckpt:
             ema.model.load_state_dict(rckpt["ema_model"])
-        start_step = int(rckpt.get("step", 0)) + 1
-        print(f"[resume] loaded {args.resume} (step={start_step - 1}) → continuing from step {start_step}")
+        # Resume optimizer state only if we're continuing the same exp (same
+        # exp_name in saved config). For cross-exp resumes (e.g. exp61 -> exp63),
+        # we want a fresh optimizer to align with the new loss landscape.
+        if discriminator is not None and "discriminator" in rckpt:
+            discriminator.load_state_dict(rckpt["discriminator"])
+            print("[resume] loaded discriminator state from ckpt")
+        elif discriminator is not None:
+            print("[resume] discriminator enabled but ckpt has no D state — D starts fresh")
+        # For exp63 specifically: when resuming exp61's ckpt as the G pretrain,
+        # restart the step counter so the cosine LR schedule starts from 0
+        # rather than from step 80000 (which would give us LR=lr_min immediately).
+        if args.use_gan and "discriminator" not in rckpt:
+            start_step = 1
+            print(f"[resume] GAN fresh-start: step counter reset to 1 (cosine LR begins fresh)")
+        else:
+            start_step = int(rckpt.get("step", 0)) + 1
+            print(f"[resume] loaded {args.resume} (step={start_step - 1}) → continuing from step {start_step}")
 
     print(f"phases: {PHASES}")
     print(f"training {start_step - 1}→{args.steps} steps")
@@ -1040,6 +1116,19 @@ def main():
                 vgg_terms = style_loss_fn(x0_hat.clamp(0, 1), target)
                 loss = loss + vgg_terms["total"]
 
+            # PatchGAN adversarial term on G. Adaptive switching: G updates
+            # against D only when G is currently losing more than D.
+            g_gan_loss_val = 0.0
+            train_g_adv = (
+                discriminator is not None
+                and (not args.gan_adaptive_switch or _g_gan_ema >= _d_loss_ema)
+            )
+            if train_g_adv:
+                d_fake_for_g = discriminator(source, x0_hat)
+                g_gan_loss = hinge_g_loss(d_fake_for_g)
+                loss = loss + args.gan_weight * g_gan_loss
+                g_gan_loss_val = float(g_gan_loss.item())
+
         loss_val = float(loss.item())
         # Track every step (incl. skipped) so the rolling mean self-corrects
         # after a regime shift. Old code appended only after the skip checks,
@@ -1070,6 +1159,33 @@ def main():
             )
         optimizer.step()
         ema.update(model)
+
+        # PatchGAN D update — runs in adaptive mode only when D is currently
+        # losing relative to G. Detached fake so no grad flows back to G.
+        d_loss_val = 0.0
+        train_d = (
+            discriminator is not None
+            and (not args.gan_adaptive_switch or _d_loss_ema >= _g_gan_ema)
+        )
+        if train_d:
+            with autocast_ctx:
+                d_real = discriminator(source, target)
+                d_fake_for_d = discriminator(source, x0_hat.detach())
+                d_loss = hinge_d_loss(d_real, d_fake_for_d)
+            d_loss_val_t = float(d_loss.item())
+            if math.isfinite(d_loss_val_t):
+                opt_d.zero_grad(set_to_none=True)
+                d_loss.backward()
+                if args.grad_clip_norm > 0:
+                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), args.grad_clip_norm)
+                opt_d.step()
+                d_loss_val = d_loss_val_t
+            else:
+                opt_d.zero_grad(set_to_none=True)
+        # Update adaptive G/D switching EMAs.
+        if discriminator is not None and args.gan_adaptive_switch:
+            _g_gan_ema = (1 - args.gan_ema_alpha) * _g_gan_ema + args.gan_ema_alpha * g_gan_loss_val
+            _d_loss_ema = (1 - args.gan_ema_alpha) * _d_loss_ema + args.gan_ema_alpha * d_loss_val
 
         step_window += 1
         if step % args.log_every == 0:
@@ -1106,7 +1222,7 @@ def main():
         fp = (args.exp_name + "_") if args.exp_name else ""
         if step % args.checkpoint_every == 0:
             ckpt_path = outdir / f"{fp}model_step_{step:06d}.pt"
-            save_checkpoint(model, ema, method_cfg, args, step, ckpt_path)
+            save_checkpoint(model, ema, method_cfg, args, step, ckpt_path, discriminator=discriminator)
             print(f"[ckpt] saved {ckpt_path}")
 
         if step % args.val_every == 0 or step % args.best_every == 0:
@@ -1116,7 +1232,7 @@ def main():
             if val_lpips < best_lpips:
                 best_lpips = val_lpips
                 best_path = outdir / f"{fp}model_best.pt"
-                save_checkpoint(model, ema, method_cfg, args, step, best_path)
+                save_checkpoint(model, ema, method_cfg, args, step, best_path, discriminator=discriminator)
                 print(f"[best] new best lpips_sq={best_lpips:.4f}  saved {best_path}")
                 if wandb is not None:
                     wandb.log({"val/best_lpips_sq": best_lpips}, step=step)
@@ -1128,7 +1244,7 @@ def main():
     # Final save
     fp = (args.exp_name + "_") if args.exp_name else ""
     final_path = outdir / f"{fp}model.pt"
-    save_checkpoint(model, ema, method_cfg, args, args.steps, final_path)
+    save_checkpoint(model, ema, method_cfg, args, args.steps, final_path, discriminator=discriminator)
     print(f"[done] saved {final_path}  best_lpips_sq={best_lpips:.4f}")
     if wandb is not None:
         wandb.finish()

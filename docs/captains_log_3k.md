@@ -1063,6 +1063,150 @@ at 0.0997).
 
 ---
 
+## exp63 — PatchGAN adversarial loss retry from exp61
+
+**Status: WIRED 2026-05-19**
+
+Retry of the parked exp20/21 era (May 2026) but under fundamentally
+better conditions. Six confounders fixed since:
+
+1. 3× more data (3k mixed vs 1k synth) — exp21 was below typical GAN data floor
+2. Modern arch (decoder_attn + pyramid + FiLM + cross-attn) — stronger G
+3. val_portraits exists — the metric that under-counted faces is gone
+4. Mid aug exposure (exp56) — D can't lean on input-fidelity shortcut
+5. Start from exp61 EMA (80k pretrained G) — eliminates "G learns shortcuts before basic photo→anime"
+6. gan_weight=0.02 between exp21b's too-weak 0.005 and exp21's catastrophic 0.1
+
+Code wired into `train_exp32_prog512.py`:
+- `PatchDiscriminator` (pix2pix 70×70, ~2.8M params) + AdamW(d_lr=1e-4, β1=0.5)
+- Hinge G/D losses (existing `gan_loss.py`)
+- Adaptive G/D switching (from exp21c — best variant): G updates when
+  `g_gan_ema >= d_loss_ema`, D updates when `d_loss_ema >= g_gan_ema`
+- Saved D state + optimizer in checkpoints; D state reload from `--resume`
+  if present, fresh-start otherwise (exp61 ckpt has no D)
+- Fresh cosine LR schedule on GAN start (step counter reset, not the
+  carried-over step=80000 which would give lr_min from step 1)
+
+A/B target — exp61 (deployment canonical, val_portraits):
+- face_lpips_sq=0.103, face_lpips_vgg=0.242, face_ssim=0.581
+- Δ_lpips_vgg=0.025 (best robustness ever)
+
+Hypothesis: PatchGAN adds texture crispness that LPIPS can't measure.
+exp21 reported "yes qualitatively, no quantitatively" — under val_portraits
+(the better metric) + stronger G base, the quantitative answer may flip.
+
+Script: `scripts/run_exp63_patchgan_retry_from_exp61.sh`
+
+20k adversarial phase. lr 1e-4 (half of 2e-4 default; the G is already
+at SOTA, fine-tuning calls for lower lr).
+
+---
+
+## exp64 — AdaLN-Zero time conditioning everywhere
+
+**Status: WIRED 2026-05-19**
+
+Replaces every `ResBlock` (additive `time_proj(t_emb)`) with
+`AdaLNResBlock` (DiT/SD3-style modulation: γ, β, α gates per norm,
+predicted per-block from t_emb).
+
+Modern flow/diffusion lit (DiT, SD3, Flux) consistently reports 1-3%
+gains from AdaLN-Zero. Our scale (50M) is below DiT-XL (~675M), so the
+gain may be smaller but the direction is well-supported.
+
+Code wired:
+- `AdaLNResBlock` class in `model.py` (drop-in for `ResBlock`, same
+  constructor signature). 6 modulation outputs per block: γ₁, β₁ on
+  pre-conv1 (in_ch dim) + α₁, γ₂, β₂, α₂ on post-conv1 / pre-conv2 /
+  post-conv2 (out_ch dim). Zero-init proj → identity at insertion time.
+- `--use-adaln-time` flag in trainer. Auto-detected in `ckpt.py` via
+  `adaln_proj_in.weight` keys.
+
+Param cost: +9.5M (~20%) vs exp59 — modulation MLPs add up across 10
+ResBlocks. Total ~58M.
+
+Single-flag delta vs exp59: `--use-adaln-time`.
+
+A/B target — exp59 (val_portraits): face_lpips_sq=0.122.
+
+Script: `scripts/run_exp64_adaln_everywhere_at_exp59_recipe.sh`
+
+---
+
+## exp65 — x0-prediction parameterization
+
+**Status: WIRED 2026-05-19**
+
+Default flow predicts velocity `v = target - source`. exp65 predicts
+the clean target `x_target` directly (DDIM-style). At inference, v_hat
+is recovered as `(x0_hat - x_t) / max(1 - t, 1e-3)` and Euler/Heun
+steps with that — ODE integration unchanged.
+
+x0-prediction has uniform output scale across t; velocity prediction
+does not. Different loss landscape; SD3 reports small but consistent
+differences between parameterizations.
+
+Code wired:
+- `FlowConfig.prediction_type` field ("v" default, "x0" alternative)
+- `flow.py:training_loss` branches on prediction_type
+- `flow.py:sample` velocity() helper derives v from x0_hat when active
+- `--flow-prediction-type` flag in trainer
+
+Single-flag delta vs exp59: `--flow-prediction-type x0`.
+
+Risk: at t close to 1, the `v = (x0_hat - x_t) / (1 - t)` recovery is
+numerically unstable. Mitigated by clamping (1 - t) ≥ 1e-3.
+
+A/B target — exp59 (val_portraits): face_lpips_sq=0.122.
+
+Script: `scripts/run_exp65_x0_pred_at_exp59_recipe.sh`
+
+---
+
+## exp66 — wider model (mc=128) capacity test
+
+**Status: WIRED 2026-05-19**
+
+exp59 recipe with `--model-ch 128` instead of 88. Bumps all internal
+widths proportionally; total params ~102M (~2.1× exp59's 49M).
+
+Tests: is capacity the bottleneck at our 3k data scale, or is the
+model already saturated?
+
+Context: exp22 (May 2026) tested mc=176 at 1k pairs and saw grid
+artifacts + identity collapse — too much capacity for the small
+dataset. With 3× more data and mc=128 (intermediate, not 176), that
+failure mode shouldn't apply. But it's worth flagging as a real risk
+— if grid artifacts return, kill immediately.
+
+Single-flag delta vs exp59: `--model-ch 128`.
+
+A/B target — exp59 (val_portraits): face_lpips_sq=0.122.
+
+Script: `scripts/run_exp66_wider_mc128_at_exp59_recipe.sh`
+
+---
+
+## Tool improvement: Heun ODE solver in `flow.sample`
+
+**Status: WIRED 2026-05-19**
+
+Pure inference-time change to `RectifiedImageFlow.sample`. New
+`sampler` kwarg with options:
+- `"euler"` (default, legacy): `x_{n+1} = x_n + dt · v(x_n, t_n)`. 1 NFE/step.
+- `"heun"`: predictor-corrector 2nd-order method:
+  `x_pred = x_n + dt · v(x_n, t_n)`,
+  `x_{n+1} = x_n + dt · 0.5 · (v(x_n, t_n) + v(x_pred, t_{n+1}))`.
+  2 NFE/step; last step falls back to Euler.
+
+Validate via `--sampler {euler,heun}` flag. **No retraining needed** —
+applies to any existing flow checkpoint. Cheapest experiment in the
+queue: compare exp60/exp61 at sample_steps=20 with euler vs heun, or
+at sample_steps=10 with heun vs sample_steps=20 with euler (same NFE
+budget, different accuracy profiles).
+
+---
+
 ## ⚠️ Benchmark caveat: Flux skin-tone bias in val_portraits (2026-05-19)
 
 Discovered while reviewing exp58b outputs: Flux occasionally produced

@@ -98,6 +98,10 @@ Established 2026-05-16. Old runs validated retroactively on this split.
 | **exp60 (80k)** | **3k mixed** | exp35 + cross-attn (**quality canonical**, first sub-0.10) | **0.0997** | **0.237** | 0.583 | **0.142** | 0.460 | +0.040 |
 | **exp61 (80k)** | **3k mixed** | exp35 arch + cross-attn + mid aug (STACK, **new canonical**) | 0.103 | **0.242** | **0.581** | 0.148 | 0.460 | **+0.025** |
 | exp62 (20k) | 3k mixed | exp35 + cross-attn (H/8 + H/4) + NO source-in-stem | TBD | TBD | TBD | TBD | TBD | TBD |
+| exp63 (20k) | 3k mixed | exp61 + PatchGAN (gan_w=0.02, adaptive G/D) | TBD | TBD | TBD | TBD | TBD | TBD |
+| exp64 (20k) | 3k mixed | exp59 + AdaLN-Zero time conditioning (DiT-style) | TBD | TBD | TBD | TBD | TBD | TBD |
+| exp65 (20k) | 3k mixed | exp59 + x0-prediction (instead of velocity) | TBD | TBD | TBD | TBD | TBD | TBD |
+| exp66 (20k) | 3k mixed | exp59 + model_ch=128 (102M params capacity test) | TBD | TBD | TBD | TBD | TBD | TBD |
 
 ## Cross-domain val (FFHQ-only-trained on legacy val)
 

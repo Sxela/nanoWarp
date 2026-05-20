@@ -156,6 +156,58 @@ class ResBlock(nn.Module):
         return h + self.skip(x)
 
 
+class AdaLNResBlock(nn.Module):
+    """ResBlock with adaLN-Zero time conditioning (DiT/SD3 style).
+
+    Drop-in alternative to ResBlock. Same constructor signature so any
+    callsite that builds ResBlock can build AdaLNResBlock instead via a
+    flag. Auto-detected from state_dict in ckpt.py via the presence of
+    `adaln_proj` keys.
+
+    Modulation: t_emb is projected to (6 * out_ch) parameters per block —
+    (γ1, β1, α1, γ2, β2, α2). γ/β scale+shift the normalised activation;
+    α is an output gate applied to each conv result before adding the
+    residual. Output projection is zero-init -> block is identity at init.
+    """
+
+    def __init__(self, in_ch: int, out_ch: int, time_ch: int):
+        super().__init__()
+        self.in_ch = in_ch
+        self.out_ch = out_ch
+        self.norm1 = nn.GroupNorm(8, in_ch, affine=False)
+        self.conv1 = nn.Conv2d(in_ch, out_ch, 3, padding=1)
+        self.norm2 = nn.GroupNorm(8, out_ch, affine=False)
+        self.conv2 = nn.Conv2d(out_ch, out_ch, 3, padding=1)
+        self.act = nn.SiLU()
+        self.skip = nn.Conv2d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
+        # Modulation outputs:
+        #   adaln_proj_in : 2*in_ch  (γ1, β1) — pre-conv1 modulation at in_ch dim
+        #   adaln_proj_out: 4*out_ch (α1, γ2, β2, α2) — α1 gates conv1 out,
+        #                                                γ2/β2 modulate pre-conv2,
+        #                                                α2 gates conv2 out.
+        # All sized correctly for their target activations after conv1 changed
+        # the channel count from in_ch -> out_ch.
+        self.adaln_proj_in = nn.Linear(time_ch, 2 * in_ch)
+        self.adaln_proj_out = nn.Linear(time_ch, 4 * out_ch)
+        # Zero-init → identity-at-init.
+        nn.init.zeros_(self.adaln_proj_in.weight)
+        nn.init.zeros_(self.adaln_proj_in.bias)
+        nn.init.zeros_(self.adaln_proj_out.weight)
+        nn.init.zeros_(self.adaln_proj_out.bias)
+
+    def _modulate(self, x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor) -> torch.Tensor:
+        return x * (1.0 + gamma.unsqueeze(-1).unsqueeze(-1)) + beta.unsqueeze(-1).unsqueeze(-1)
+
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
+        g1, b1 = self.adaln_proj_in(t_emb).chunk(2, dim=-1)
+        a1, g2, b2, a2 = self.adaln_proj_out(t_emb).chunk(4, dim=-1)
+        h = self.conv1(self.act(self._modulate(self.norm1(x), g1, b1)))
+        h = h * a1.unsqueeze(-1).unsqueeze(-1)
+        h = self.conv2(self.act(self._modulate(self.norm2(h), g2, b2)))
+        h = h * a2.unsqueeze(-1).unsqueeze(-1)
+        return h + self.skip(x)
+
+
 class FuseBlock(nn.Module):
     def __init__(self, unet_ch: int, src_ch: int):
         super().__init__()
@@ -277,6 +329,7 @@ class Img2ImgDiffusionUNet(nn.Module):
         dit_mlp_ratio: float = 4.0,
         use_cross_attn_cond: bool = False,
         use_cross_attn_cond_h4: bool = False,
+        use_adaln_time: bool = False,
     ):
         super().__init__()
         if upsample_type not in ("resize_conv", "pixel_shuffle"):
@@ -301,6 +354,11 @@ class Img2ImgDiffusionUNet(nn.Module):
         self.use_source_pyramid = use_source_pyramid
         self.use_decoder_attn = use_decoder_attn
         self.use_dit_bottleneck = use_dit_bottleneck
+        self.use_adaln_time = use_adaln_time
+        # Pick the ResBlock variant once; downstream constructors use _ResB.
+        # AdaLN-Zero (DiT/SD3-style modulation) replaces additive time_proj
+        # with full γ,β,α modulation per norm.
+        _ResB = AdaLNResBlock if use_adaln_time else ResBlock
         self._temporal_num_frames: int = 1  # set via set_temporal_frames()
         if use_source_encoder:
             self.source_encoder = SourceEncoder(
@@ -335,16 +393,16 @@ class Img2ImgDiffusionUNet(nn.Module):
         stem_in_ch = in_ch + 3 if source_in_stem else in_ch
         self.in_conv = nn.Conv2d(stem_in_ch, c1, 3, padding=1)
 
-        self.down1 = ResBlock(c1, c1, time_dim * 4)
+        self.down1 = _ResB(c1, c1, time_dim * 4)
         self.ds1 = Downsample(c1)
 
-        self.down2 = ResBlock(c1, c2, time_dim * 4)
+        self.down2 = _ResB(c1, c2, time_dim * 4)
         self.ds2 = Downsample(c2)
 
-        self.down3 = ResBlock(c2, c3, time_dim * 4)
+        self.down3 = _ResB(c2, c3, time_dim * 4)
         self.ds3 = Downsample(c3)
 
-        self.down4 = ResBlock(c3, c4, time_dim * 4)
+        self.down4 = _ResB(c3, c4, time_dim * 4)
         self.ds4 = Downsample(c4)
 
         # Bottleneck. `mid1` always projects c4 → cm. `mid_attn` and `mid2` are
@@ -352,7 +410,7 @@ class Img2ImgDiffusionUNet(nn.Module):
         # DiT blocks (use_dit_bottleneck=True). The DiT stack is identity at
         # init via adaLN-zero, so a non-DiT checkpoint loads cleanly via
         # strict=False when use_dit_bottleneck is flipped on.
-        self.mid1 = ResBlock(c4, cm, time_dim * 4)
+        self.mid1 = _ResB(c4, cm, time_dim * 4)
         if use_dit_bottleneck:
             self.mid_attn = None
             self.mid2 = None
@@ -364,7 +422,7 @@ class Img2ImgDiffusionUNet(nn.Module):
             )
         else:
             self.mid_attn = BottleneckAttention(cm)
-            self.mid2 = ResBlock(cm, cm, time_dim * 4)
+            self.mid2 = _ResB(cm, cm, time_dim * 4)
             self.dit_bottleneck = None
 
         # Temporal attention — inserted after every encoder/bottleneck/decoder block.
@@ -438,13 +496,13 @@ class Img2ImgDiffusionUNet(nn.Module):
 
         UpModule = PixelShuffleUpsample if upsample_type == "pixel_shuffle" else Upsample
         self.up4 = UpModule(cm)
-        self.dec4 = ResBlock(cm + c4, c3, time_dim * 4)
+        self.dec4 = _ResB(cm + c4, c3, time_dim * 4)
         self.up3 = UpModule(c3)
-        self.dec3 = ResBlock(c3 + c3, c3, time_dim * 4)
+        self.dec3 = _ResB(c3 + c3, c3, time_dim * 4)
         self.up2 = UpModule(c3)
-        self.dec2 = ResBlock(c3 + c2, c2, time_dim * 4)
+        self.dec2 = _ResB(c3 + c2, c2, time_dim * 4)
         self.up1 = UpModule(c2)
-        self.dec1 = ResBlock(c2 + c1, c1, time_dim * 4)
+        self.dec1 = _ResB(c2 + c1, c1, time_dim * 4)
 
         self.out_norm = nn.GroupNorm(8, c1)
         self.out_conv = nn.Conv2d(c1, out_ch, 3, padding=1)
