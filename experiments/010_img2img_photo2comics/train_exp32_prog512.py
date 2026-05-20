@@ -443,9 +443,11 @@ def parse_args():
                    help="Discriminator AdamW lr. Typically lower than G lr to keep balance.")
     p.add_argument("--gan-d-beta1", type=float, default=0.5,
                    help="AdamW beta1 for D. 0.5 is pix2pix / GAN convention.")
-    p.add_argument("--gan-adaptive-switch", action="store_true", default=True,
+    p.add_argument("--gan-adaptive-switch", action=argparse.BooleanOptionalAction, default=True,
                    help="Adaptive G/D alternation: G updates when g_gan_ema >= d_loss_ema; "
-                        "D updates when d_loss_ema >= g_gan_ema. Stabilizes training.")
+                        "D updates when d_loss_ema >= g_gan_ema. Stabilizes training in theory "
+                        "but can starve D if G starts strong (e.g. resuming from exp61). "
+                        "Use --no-gan-adaptive-switch to force every-step updates for both.")
     p.add_argument("--gan-ema-alpha", type=float, default=0.1,
                    help="EMA factor for the adaptive G/D switching tracker.")
     p.add_argument("--no-source-in-stem", action="store_true",
@@ -625,16 +627,34 @@ def parse_args():
 # ---------------------------------------------------------------------------
 
 def _sample_from_source(ema_model, diffusion, source, sample_steps, device, method="flow"):
-    """Single rollout. Dispatches on method:
-    - flow: Euler-ODE from x=source over t in [0,1]
+    """Single rollout. Dispatches on method (and on prediction_type for flow):
+    - flow + v-pred (default): Euler-ODE from x=source, treating model output as velocity
+    - flow + x0-pred: same ODE but model output is x0_hat; recover v = (x0_hat - x_t) / (1-t)
     - diffusion: DDIM from x=randn over the model's full diffusion schedule
+
+    HISTORY: prior to 2026-05-20, this helper hard-coded "model output is
+    velocity" — which was wrong for exp65 (x0-prediction) and produced
+    overcooked / over-amplified in-training panels and bogus in-loop val
+    metrics. validate.py via flow.sample() always dispatched correctly,
+    so final-val numbers were always right; only the training-time
+    artifacts and the in-loop wandb val metrics were affected.
     """
     if method == "flow":
+        # Detect x0-prediction (default config: "v"). Mirror flow.sample().
+        pred_type = getattr(diffusion.config, "prediction_type", "v")
         ts = torch.linspace(0.0, 1.0, sample_steps + 1, device=device)
         x = source.clone()
         for j in range(sample_steps):
             t_cur = ts[j].expand(source.shape[0])
-            v = ema_model(source, x, diffusion._scale_t(t_cur))
+            t_emb_in = diffusion._scale_t(t_cur)
+            out = ema_model(source, x, t_emb_in)
+            if pred_type == "x0":
+                # out is x0_hat; recover instantaneous velocity for the Euler step.
+                t_b = t_cur.view(-1, 1, 1, 1).float()
+                denom = (1.0 - t_b).clamp(min=1e-3)
+                v = (out - x) / denom
+            else:
+                v = out
             x = x + float(ts[j + 1] - ts[j]) * v
         return x.clamp(0, 1)
     # diffusion: GaussianImageDiffusion.sample handles DDIM internally and

@@ -9,14 +9,16 @@ A focused repo for figuring out how far we can push **structure-preserving visua
 
 ## Current status (2026-05-19)
 
-**62 experiments deep**, single canonical line on flow-matching img2img at ~50M params.
+**65+ experiments deep**, single canonical line on flow-matching img2img at ~50M params.
 
 | canonical | recipe | val_portraits face_lpips_sq | Δ_lpips_vgg | use case |
 |---|---|---|---|---|
-| **exp60** (80k) | minimal aug + cross-attn @ H/8 | **0.0997** | 0.040 | benchmark / pure quality |
-| **exp61** (80k) | mid aug + cross-attn @ H/8 (STACK) | 0.103 | **0.025** | deployment / real-world inputs |
+| **exp65b** (80k, x0-pred) | minimal aug + cross-attn @ H/8 + x0-prediction | **0.0996** | 0.047 | **quality canonical** — best face quality + huge SSIM jump |
+| **exp61** (80k) | mid aug + cross-attn @ H/8 (STACK) | 0.103 | **0.025** | deployment canonical — best real-world robustness |
 
-Cleanest numbers in the project: **first sub-0.10 face_lpips_sq** (exp60) and the **best robustness Δ ever measured** (exp61). The two canonicals are orthogonal — quality vs corruption-robustness — and stack together when both matter.
+**exp65b is the new quality canonical**: x0-prediction (predicting clean target directly instead of velocity) gave the biggest single-experiment quality win of the entire 3k era — wins on every quality metric including **+29% SSIM** and **-10% legacy val face_lpips_sq**. Ties exp60 on face_lpips_sq to 4 decimals. The tradeoff is robustness Δ (+17-21% regression). Mid-aug component from exp61 still owns the robustness lever.
+
+**exp65c stack** (x0-pred + mid-aug + cross-attn at 80k) is the open question: if orthogonal composition holds, it would deliver best quality AND best robustness in one model — the single canonical.
 
 The current architecture under both canonicals:
 
@@ -137,7 +139,12 @@ Knobs that have been thoroughly explored (and the verdict):
 | logit-normal t-sampling | exp58/58b | doesn't transfer from text2img (endpoint starvation) |
 | **cross-attn conditioning** | exp59/60 | clean uniform win at +500k params |
 | **stack mid-aug + cross-attn** | exp61 | best robustness ever, ties best quality |
-| drop source-in-stem + multi-scale xa | exp62 | wired, pending |
+| drop source-in-stem + multi-scale xa | exp62 | small portrait quality win, +17% robustness regression (source-in-stem is a robustness feature) |
+| PatchGAN adversarial on exp61 (gan_w=0.02 + adaptive switch) | exp63 | metrics moved within noise; visually subtle drift, NOT texture sharpening. gan_weight too weak + adaptive switch starved D. Retry pending. |
+| AdaLN-Zero time conditioning everywhere | exp64 / exp64b | **LOSES at 80k** (+11% face_lpips_sq, +46% Δ vs exp60). Modern transformer-arch tricks don't auto-port to small conv UNets. Chapter closed. |
+| **x0-prediction (vs velocity)** | exp65 / exp65b | **NEW QUALITY CANONICAL at 80k**: ties exp60 face_lpips_sq, +29% whole_ssim portraits, -10% legacy face_lpips_sq, +21% robustness Δ regression. Biggest single-experiment quality win of the 3k era. |
+| wider mc=128 capacity test | exp66 / exp66b | **LOSES at 80k** (+5% face_lpips_sq, +26% Δ vs exp60). 50M is the right size for 3k data; more params overfits. |
+| SGDR 2-cycle LR schedule | exp67 / exp67b | **LOSES at 80k** (+4% face_lpips_sq). Warm restart disrupts productive late-training refinement; the late-cosine "plateau" was actually useful. LR-schedule axis closed alongside LR-value axis. |
 
 ---
 
@@ -233,7 +240,7 @@ nanoWarp/
 
 ---
 
-## Notable principles encoded over 62 experiments
+## Notable principles encoded over 60+ experiments
 
 - **In-model architecture, no inference-time external deps**: the entire pipeline ships in the `.pt`.
 - **`x_t = (1-t)·source + t·target` matters**: source is already implicit in the flow interpolant, which is why source-in-stem may be redundant (exp62 tests this).
@@ -243,6 +250,9 @@ nanoWarp/
 - **Val resolution must match training resolution** for honest numbers; misaligned val is misleading.
 - **CFG doesn't transfer from diffusion to flow** (in flow, v is a true velocity, can't be amplified).
 - **Skin-tone bias in the Flux-generated targets** affects val_portraits comparison interpretation — small deltas (1-5%) are robust, medium deltas (10%) are partially confounded, large deltas (>30%) are too big to be pure bias.
+- **50M params + simple additive time_proj is the recipe ceiling at 3k mixed data**: confirmed by *two* clean negative results — exp66b (mc=128 at 80k LOSES) and exp64b (AdaLN-Zero at 80k LOSES). Any +params architectural addition overfits at our data scale. To unlock more capacity, scale data first (10k+ pairs).
+- **Modern transformer-arch tricks don't auto-port to small conv UNets**: DiT/SD3-style AdaLN-Zero requires both transformer-heavy architecture AND much larger scale (DiT-XL 675M, SD3 8B) to pay off.
+- **lr=2e-4 is well-calibrated for the canonical recipe** (exp68a confirmed): even 2× (lr=4e-4) caused +29% face_lpips_sq regression. The LR axis is closed; the default that came down from exp01 era happens to be near-optimal.
 
 ---
 

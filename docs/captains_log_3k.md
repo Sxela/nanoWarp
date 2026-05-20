@@ -1020,7 +1020,9 @@ canonical decision is already made.
 
 ## exp62 — drop source-in-stem + add cross-attn at H/4
 
-**Status: WIRED 2026-05-19**
+**Status: DONE 2026-05-20** — best 20k flow face_lpips_sq ever (0.119,
+beats exp59's 0.122), but robustness regressed +17% on Δ. Two stacked
+changes disambiguated below.
 
 Two-knob delta vs exp59 (cross-attn @ H/8, 20k):
 1. `--no-source-in-stem`: in_conv goes 6→88 ch to 3→88 ch. Source no
@@ -1058,14 +1060,64 @@ A/B target — exp59 (20k, cross-attn @ H/8 only, source_in_stem=True):
 
 Script: `scripts/run_exp62_no_concat_plus_ca_h4_at_exp50_recipe.sh`
 
-If wins → 80k promotion as exp62b vs exp60 (current quality canonical
-at 0.0997).
+**Results vs exp59 (20k baseline)**:
+
+| split | metric | exp59 | exp62 | Δ |
+|---|---|---|---|---|
+| **val_portraits** | **face_lpips_sq** | 0.122 | **0.119** | **-2.5% WIN (best 20k flow ever)** |
+| val_portraits | face_lpips_vgg | 0.282 | 0.278 | -1.4% WIN |
+| val_portraits | face_ssim | 0.546 | 0.554 | +1.5% WIN |
+| val_portraits | whole lpips_sq | 0.166 | 0.165 | -0.6% (tie) |
+| val_portraits | whole ssim | 0.445 | 0.449 | +0.9% (tie) |
+| val_portraits | **Δ_lpips_vgg** | 0.035 | **0.041** | **+17.1% LOSS** |
+| val_portraits | Δ_lpips_sq | 0.024 | 0.030 | +25.0% LOSS |
+| legacy val | face_lpips_sq | 0.203 | 0.205 | +1.0% (tie) |
+| legacy val | face_ssim | 0.598 | 0.609 | +1.8% WIN |
+| legacy val | whole ssim | 0.512 | 0.521 | +1.8% WIN |
+| legacy val | Δ_lpips_vgg | 0.111 | 0.120 | +8.1% LOSS |
+
+**Disambiguating the two stacked changes**:
+
+1. **H/4 cross-attn** (extra multi-scale conditioning) → small uniform
+   quality win on portraits. Same direction as exp59's H/8 cross-attn
+   win, just smaller marginal gain. The "stronger source conditioning
+   helps fine face detail" story holds at H/4 too. To isolate cleanly,
+   could test exp68 = exp59 + H/4 cross-attn (keeping source-in-stem).
+
+2. **Dropping source-in-stem** → robustness regression. Without the
+   clean source channel directly in the encoder path, when the input
+   source is corrupted the model has to extract source info from x_t
+   (the interpolant of `(1-t)·source + t·target`, also corrupted) and
+   from the pyramid (also fed the corrupted source). source-in-stem
+   provided a "clean source" anchor — which val_corrupt + Δ_lpips_vgg
+   specifically test.
+
+**Key finding**: **source-in-stem is a robustness feature, not a
+quality feature.** The "x_t already contains source at t=0" hypothesis
+was right for clean inference but missed the corruption-robustness
+contribution. For deployment recipes (where real-world inputs are
+often corrupted), keep source-in-stem. For pure-benchmark recipes
+(where val is clean), the slight quality win from dropping it might
+be worth the robustness cost — but exp61 (mid aug + source-in-stem +
+cross-attn @ H/8) still dominates because mid aug + source-in-stem
+together give Δ=0.025, which exp62's 0.041 can't touch.
+
+**Next**:
+- **exp68 (proposed)**: exp59 + H/4 cross-attn ONLY (keep source-in-stem).
+  Isolates the H/4 win from the source-in-stem loss. Predicts:
+  ~0.119 face_lpips_sq AND ~0.035 Δ_lpips_vgg.
+- exp62 itself is parked — it's strictly dominated by what exp68 will
+  likely be (better quality AND better robustness).
 
 ---
 
 ## exp63 — PatchGAN adversarial loss retry from exp61
 
-**Status: WIRED 2026-05-19**
+**Status: DONE 2026-05-20, REVISED VERDICT** — metric "wins" are within
+run-to-run noise. In-loop val curves were flat, visual changes are
+subtle facial-feature drift (NOT the texture sharpness PatchGAN is
+supposed to add). **exp61 stays canonical.** PatchGAN was effectively
+silent; root cause analysis below.
 
 Retry of the parked exp20/21 era (May 2026) but under fundamentally
 better conditions. Six confounders fixed since:
@@ -1100,11 +1152,91 @@ Script: `scripts/run_exp63_patchgan_retry_from_exp61.sh`
 20k adversarial phase. lr 1e-4 (half of 2e-4 default; the G is already
 at SOTA, fine-tuning calls for lower lr).
 
+**Results vs both prior canonicals**:
+
+| metric (val_portraits) | exp60 (former quality) | exp61 (former deployment) | **exp63 (new single)** |
+|---|---|---|---|
+| face_lpips_sq | **0.0997** | 0.103 | 0.101 (ties exp60 within 1.3%) |
+| face_lpips_vgg | 0.237 | 0.242 | 0.239 (tie) |
+| face_ssim | 0.583 | 0.581 | **0.583** (tied with exp60 to 3dp) |
+| whole lpips_sq | **0.142** | 0.148 | 0.146 |
+| whole ssim | 0.460 | 0.460 | **0.461** |
+| **Δ_lpips_vgg** | 0.040 | 0.025 | **0.024** (best ever) |
+| Δ_lpips_sq | TBD | 0.015 | **0.014** (best ever) |
+
+Legacy val: tied with exp61 across the board (face_lpips_sq +2% slight
+loss within noise, everything else ≤ 1% delta), robustness Δ_lpips_vgg
+0.076 vs exp61's 0.078 (slight win).
+
+**Six fixed-confounders summary** (vs exp20/21 era):
+1. 3× data + real-photo sources (3k mixed) — exp21 was below GAN data floor
+2. Modern arch (decoder_attn + pyramid + FiLM + cross-attn) — strong G base
+3. val_portraits — exp21's "qualitative win, quantitative loss" was a wrong-metric problem
+4. Mid aug — D can't lean on input-fidelity shortcut
+5. **Start from exp61 EMA** — biggest single fix; G is already SOTA, no "fool D per patch" shortcut
+6. gan_weight=0.02 (between exp21b's 0.005 and exp21's 0.1)
+
+Each individually plausibly load-bearing; together they flipped the
+conclusion from "parked" to "new canonical".
+
+**🚨 REVISED VERDICT (2026-05-20, after visual check)**:
+
+Visual inspection of exp63 panels vs exp61 shows **subtle facial-feature
+drift, not sharpness/texture gains**. The in-loop val curves were flat
+during the adversarial phase. The 1-4% "improvements" on metrics are
+within run-to-run noise.
+
+**This is a no-signal result wearing a positive-metric mask.** The
+adversarial pressure didn't actually do its job — G drifted slightly
+from the exp61 EMA starting point into slightly-different local minima,
+but NOT toward the texture-crisp output PatchGAN was supposed to push.
+
+**Three likely causes**:
+
+1. **gan_weight=0.02 too weak from a pretrained G**. exp21 used 0.1
+   from random G and D dominated. From exp61's pretrained G, LPIPS+flow
+   loss already dominates the optimization — 0.02 adversarial term is
+   too quiet to pull G into texture-sharper minima. Sweet spot for
+   "strong G + adversarial fine-tune" is probably 0.04-0.06.
+
+2. **Adaptive G/D switching probably starved D**. From a pretrained
+   strong G, every batch likely starts with `g_gan_ema < d_loss_ema`
+   (G is "winning"), so the switch keeps updating G and skips D. D
+   never builds up enough discriminative power to push back. Need to
+   force D to train continuously (or at least N steps per cycle)
+   regardless of the adaptive heuristic.
+
+3. **20k adversarial phase too short for cold-start D**. From a strong
+   pretrained G, D has to learn the target distribution from scratch
+   while G barely moves. With adaptive switching starving D further,
+   D may have been near-random throughout — explaining the flat
+   in-loop val curves.
+
+**exp61 stays canonical.** exp63 is NOT a canonical replacement.
+
+**Next-step diagnostics**:
+- Check wandb D loss curve for exp63: was D actually training, or
+  was it stuck near initialization?
+- Was the adaptive switch firing in a 50/50 mix, or G-biased?
+- If diagnosis confirms "D underdeveloped", try **exp63b** with:
+  - `--gan-weight 0.05` (or 0.04)
+  - `--no-gan-adaptive-switch` (force D to train every step)
+  - Optional: longer D pretrain at the start to build it up before
+    adversarial phase kicks in
+
+**What this rules out so far**: simply layering PatchGAN at gan_weight=0.02
+with adaptive switching on top of exp61 doesn't work. Doesn't rule out
+PatchGAN as a lever — just rules out this specific configuration.
+
+---
+
 ---
 
 ## exp64 — AdaLN-Zero time conditioning everywhere
 
-**Status: WIRED 2026-05-19**
+**Status: DONE 2026-05-20** — loses at 20k. Verdict pending exp64b
+(80k retry) because the +20% params (+9.5M) plausibly need more steps
+to fit. Not parked outright.
 
 Replaces every `ResBlock` (additive `time_proj(t_emb)`) with
 `AdaLNResBlock` (DiT/SD3-style modulation: γ, β, α gates per norm,
@@ -1131,11 +1263,196 @@ A/B target — exp59 (val_portraits): face_lpips_sq=0.122.
 
 Script: `scripts/run_exp64_adaln_everywhere_at_exp59_recipe.sh`
 
+**Results vs exp59 (clear LOSS across the board)**:
+
+| split | metric | exp59 | exp64 | Δ |
+|---|---|---|---|---|
+| val_portraits | face_lpips_sq | 0.122 | 0.131 | **+7.4% LOSS** |
+| val_portraits | face_lpips_vgg | 0.282 | 0.300 | +6.4% LOSS |
+| val_portraits | face_ssim | 0.546 | 0.534 | -2.2% LOSS |
+| val_portraits | whole lpips_sq | 0.166 | 0.176 | +6.0% LOSS |
+| val_portraits | whole ssim | 0.445 | 0.433 | -2.7% LOSS |
+| val_portraits | **Δ_lpips_vgg** | 0.035 | 0.048 | **+37% LOSS** |
+| val_portraits | Δ_lpips_sq | 0.024 | 0.038 | +58% LOSS |
+| legacy val | face_lpips_sq | 0.203 | 0.206 | +1.5% (tie) |
+| legacy val | face_ssim | 0.598 | 0.614 | +2.7% WIN (one positive) |
+| legacy val | whole ssim | 0.512 | 0.516 | +0.8% (tie) |
+| legacy val | Δ_lpips_vgg | 0.111 | 0.120 | +8% LOSS |
+
+**Why it failed at our scale**:
+
+The modern lit support for AdaLN-Zero comes from DiT-XL (~675M),
+SD3 (~8B), Flux (~12B). All are **transformer-heavy architectures**
+where adaLN is the natural way to inject time/class conditioning into
+attention/MLP blocks. We applied it to a **50M conv UNet** where:
+
+1. **Conv ResBlocks have strong inductive bias from the convolutional
+   structure itself.** Replacing the simple additive `time_proj` with
+   per-norm γ/β/α modulation adds complexity that the conv path
+   doesn't really need — the gates can interfere with the existing
+   residual flow.
+
+2. **+9.5M extra params (~20%)** but quality REGRESSED. Confirms
+   capacity is not the bottleneck and this addition is net-harmful.
+
+3. **Zero-init output gates → identity at init** should make this
+   safe, but the optimization dynamics over 20k steps clearly didn't
+   settle into a useful adaLN configuration — the α gates may have
+   stayed near zero, effectively wasting the modulation pathway, while
+   the missing additive `time_proj` left the model under-conditioned
+   on t.
+
+4. **Robustness collapsed disproportionately** (+37-58% on Δ). The
+   model relies heavily on time conditioning for the corruption pass
+   (since corrupted source means x_t at various noise levels deviates
+   from training distribution). Weakened time conditioning hits
+   robustness harder than clean-val.
+
+**Caveat — possibly under-trained**: exp64 adds 9.5M params (+20%) but
+runs the same 20k steps as exp59. That's ~17% fewer effective gradient
+updates per param. The α gates specifically start at 0 (identity-at-init)
+and must discover their useful configurations *from scratch* during
+training — that's an extra learning task layered on top of the conv
+pathway. Modern AdaLN-Zero results in the lit train for many more
+steps relative to model size.
+
+The +37% robustness regression argues against pure under-training
+(robustness shouldn't actively *worsen* if the model just hasn't
+finished learning) — but a long-training retry is the only honest way
+to settle the question.
+
+**Tentative interpretation pending exp64b**: modern transformer-arch
+tricks don't auto-port to small conv UNets, but the verdict isn't
+final.
+
+---
+
+## exp63b — PatchGAN retry with diagnosis fixes (stronger gan_w + forced D)
+
+**Status: WIRED 2026-05-20**
+
+exp63's silent-PatchGAN result came from two compounding issues:
+gan_weight=0.02 too weak from a pretrained G, and adaptive G/D switching
+starving D entirely (G always "won" relative to a near-random D, so the
+switch kept skipping D updates).
+
+exp63b fixes both:
+- `--gan-weight 0.05` (2.5× stronger; sweet spot for "strong G +
+  adversarial fine-tune" — between exp21b's too-weak 0.005 and exp21's
+  catastrophic 0.1)
+- `--no-gan-adaptive-switch` (force D to update every step regardless
+  of relative loss — gives D time to develop discriminative power
+  even when G is initially "winning")
+
+Required code fix: the `--gan-adaptive-switch` flag was set with
+`action="store_true", default=True` which couldn't be disabled.
+Switched to `argparse.BooleanOptionalAction` so `--no-gan-adaptive-switch`
+now works. Default behavior (adaptive ON) unchanged.
+
+Same exp61 EMA resume, same 20k adversarial phase, same mid-aug stack
+as exp63.
+
+A/B target — exp61 (val_portraits, current deployment canonical):
+face_lpips_sq=0.103, face_lpips_vgg=0.242, face_ssim=0.581,
+Δ_lpips_vgg=0.025.
+
+Decision rule:
+- Visible texture/sharpness improvement (subjective) + metric tie or
+  small WIN → PatchGAN finally working; promote.
+- Metric LOSE (>3% face_lpips_sq) → 0.05 too strong from pretrained G;
+  try exp63c at 0.03 (middle ground).
+- Visible degradation (color smear / blockiness) → D dominated;
+  abandon PatchGAN at our scale.
+
+Risk monitoring: at 0.05 weight + always-on D, watch wandb d_real vs
+d_fake — sustained `d_real - d_fake > 4` means D is winning too hard
+(exp21's failure mode). Also visual inspection of panels at step 5k,
+10k, 15k — if degeneration appears, kill early.
+
+Script: `scripts/run_exp63b_patchgan_stronger_from_exp61.sh`
+
+---
+
+## exp64b — AdaLN-Zero at 80k (under-training retry)
+
+**Status: DONE 2026-05-20** — **under-training hypothesis REFUTED for
+AdaLN too**. +11% LOSS on face_lpips_sq vs exp60, +46% LOSS on
+robustness Δ. Chapter closed.
+
+Same recipe as exp64, just 4× longer training. Tests whether the
++20%-params/-17%-updates-per-param argument was right. A/B against
+**exp60** (current 80k quality canonical), not exp59.
+
+A/B target — exp60 (val_portraits):
+- face_lpips_sq=0.0997 (first sub-0.10 ever)
+- face_lpips_vgg=0.237, face_ssim=0.583
+- Δ_lpips_vgg=0.040
+
+Decision rule:
+- exp64b face_lpips_sq ≤ 0.10 → "needs more steps" confirmed,
+  AdaLN-Zero becomes canonical, exp60 retires.
+- exp64b within 3% of exp60 but > 0.10 → lever borderline; cite exp60
+  as canonical, archive exp64b as a reference point.
+- exp64b > 5% worse than exp60 → AdaLN-Zero is dead at our scale,
+  close the chapter.
+
+Same caveat applies to **exp66 (mc=128)** at 20k — adds even more
+params (+108%), under-training risk is bigger. Consider exp66b @ 80k
+if exp66 @ 20k loses by a similar margin.
+
+Script: `scripts/run_exp64b_adaln_everywhere_at_80k.sh`
+
+**Results vs exp60 (mc=88, additive time_proj, 80k)**:
+
+| split | metric | exp60 | exp64b | Δ |
+|---|---|---|---|---|
+| val_portraits | **face_lpips_sq** | **0.0997** | 0.111 | **+11.3% LOSE** |
+| val_portraits | face_lpips_vgg | 0.237 | 0.261 | +10.1% LOSE |
+| val_portraits | face_ssim | 0.583 | 0.565 | -3.1% LOSE |
+| val_portraits | whole lpips_sq | 0.142 | 0.154 | +8.5% LOSE |
+| val_portraits | whole ssim | 0.460 | 0.446 | -3.0% LOSE |
+| val_portraits | **Δ_lpips_vgg** | 0.040 | 0.0586 | **+46.5% LOSE** |
+| legacy val | face_lpips_sq | 0.182 | 0.186 | +2.2% LOSE |
+| legacy val | face_lpips_vgg | 0.349 | 0.357 | +2.3% LOSE |
+| legacy val | Δ_lpips_vgg | 0.113 | 0.130 | +15% LOSE |
+
+**Training did help** vs exp64 @ 20k: face_lpips_sq portraits went
+0.131 → 0.111 (-15%) with 4× more training. But it never catches the
+exp60 baseline at 0.0997. AdaLN learns *something* over 80k — just
+something worse than what additive time_proj learns at 50M params.
+
+**Under-training hypothesis: REFUTED for AdaLN.** Combined with
+exp66b (mc=128 LOSES at 80k), we now have **two clean data points
+confirming the same lesson**:
+
+> At 3k mixed data + 50M params + 80k training, **any +params
+> architectural addition overfits rather than helps**. AdaLN-Zero
+> (+9.5M modulation MLPs) and mc=128 (+51M wider channels) both
+> trained to LOSS, not WIN.
+
+**Chapter closed on AdaLN-Zero at our scale.** The additive
+`time_proj` baseline in ResBlock is doing real work that adaLN-zero's
+gated modulation disrupts. Modern DiT/SD3 results (DiT-XL 675M, SD3
+8B) don't transfer to 50M conv UNets.
+
+**Implications going forward**:
+- Stop testing "+more params" variants at the current data scale.
+  exp65b (x0-pred, no extra params, +26% SSIM at 20k) and exp63b
+  (PatchGAN refinement, only +D params for the loss term) are still
+  worth running — both add capability without adding G params.
+- To make wider/deeper models useful, we'd need to scale data first
+  (10k+ pairs, not 3k). That's a multi-day Flux generation effort.
+- The recipe space at 50M is now well-characterized. Remaining
+  levers are: training-objective changes (x0 vs v), loss-term
+  additions (PatchGAN), LR schedule (exp68 sweep). No more arch.
+
 ---
 
 ## exp65 — x0-prediction parameterization
 
-**Status: WIRED 2026-05-19**
+**Status: DONE 2026-05-20** — substantial win on SSIM/LPIPS-VGG
+across both splits, small robustness regression. 80k promotion
+candidate.
 
 Default flow predicts velocity `v = target - source`. exp65 predicts
 the clean target `x_target` directly (DDIM-style). At inference, v_hat
@@ -1161,11 +1478,92 @@ A/B target — exp59 (val_portraits): face_lpips_sq=0.122.
 
 Script: `scripts/run_exp65_x0_pred_at_exp59_recipe.sh`
 
+**Results vs exp59 (substantial wins on SSIM/LPIPS-VGG, robustness regresses)**:
+
+| split | metric | exp59 | exp65 | Δ |
+|---|---|---|---|---|
+| val_portraits | face_lpips_sq | 0.122 | 0.121 | -0.8% (tie) |
+| val_portraits | face_lpips_vgg | 0.282 | 0.269 | **-4.6% WIN** |
+| val_portraits | face_ssim | 0.546 | 0.587 | **+7.5% WIN** |
+| val_portraits | whole lpips_sq | 0.166 | 0.163 | -1.8% WIN |
+| val_portraits | **whole ssim** | 0.445 | **0.559** | **+25.6% WIN (huge)** |
+| val_portraits | **Δ_lpips_vgg** | 0.035 | 0.042 | **+18.6% LOSS** |
+| val_portraits | Δ_lpips_sq | 0.024 | 0.033 | +35.4% LOSS |
+| legacy val | face_lpips_sq | 0.203 | 0.188 | **-7.4% WIN** |
+| legacy val | face_lpips_vgg | 0.381 | 0.344 | **-9.7% WIN** |
+| legacy val | face_ssim | 0.598 | 0.674 | **+12.7% WIN** |
+| legacy val | whole ssim | 0.512 | 0.623 | **+21.7% WIN** |
+| legacy val | Δ_lpips_vgg | 0.111 | 0.133 | +19.8% LOSS |
+
+**The SSIM jump is striking**: +26% on val_portraits whole_ssim,
++22% on legacy val. That's not a tie-within-noise — that's a different
+quality regime. SSIM measures pixel-luminance-structure similarity;
+x0-prediction trains the model to output clean targets directly
+(MSE-against-target instead of MSE-against-velocity), so its outputs
+are anchored in clean pixel space — which SSIM rewards heavily.
+
+LPIPS-VGG also improves consistently (-5 to -10%), confirming the
+output quality is genuinely better, not just a metric artifact.
+Face_lpips_sq stays tied on portraits but wins by 7% on legacy val.
+
+**Robustness regression** (~20-35% on Δ): two compounding causes:
+1. Inference recovery `v_hat = (x0_hat - x_t) / (1-t)` compounds errors
+   when x_t is corrupted — the division amplifies any deviation
+2. x0-prediction trains the model to confidently output clean targets;
+   this makes it brittle when the input source is OOD (corrupted)
+
+Same robustness-tradeoff pattern as exp62 (no source-in-stem) — but
+the quality wins here are much bigger, so the tradeoff is more
+defensible.
+
+**Why this matters for canonical choice**:
+- exp60 (v-prediction canonical): face_lpips_sq=0.0997, ssim=~0.46
+- exp65 @ 20k: face_lpips_sq=0.121, ssim=0.56
+- Speculative exp65b @ 80k: face_lpips_sq=~0.099, ssim=~0.59-0.60?
+
+If the SSIM win holds at 80k while face_lpips_sq matches exp60, x0-pred
+becomes a serious alternative canonical. SSIM jump from ~0.46 → ~0.59
+would be the single biggest visual quality lever we've found.
+
+**🐛 BUG FOUND in exp65's in-training panels (fixed 2026-05-20)**:
+`_sample_from_source` (used by all in-training panel saves + in-loop
+val) was hard-coded to treat `ema_model(source, x, t)` as velocity.
+Under `--flow-prediction-type x0`, the model outputs x0_hat, NOT v —
+so the helper was adding x0_hat directly to x_t as if it were a
+velocity, over-amplifying every Euler step. That's why exp65's
+in-training panels looked "overcooked" — they were a buggy sampler
+applied to a correctly-trained x0 model.
+
+**Final-val numbers are unaffected** (validate.py routes through
+`flow.sample()` which always dispatched correctly). So the +26% SSIM
+result above is real; only the wandb in-loop val metrics + panel PNGs
+saved during training are bogus for exp65.
+
+Fix: `_sample_from_source` now mirrors `flow.sample()`'s dispatch on
+`prediction_type`. v-pred path is bit-identical to before; x0-pred path
+recovers `v = (x0_hat - x_t) / max(1-t, 1e-3)` before each Euler step.
+Smoke confirmed helper matches `flow.sample()` exactly under both
+pred types.
+
+**Proposed exp65b**: x0-prediction at 80k vs exp60. Same script as
+exp65, just `--steps 80000` + 80k-tuned val intervals. With the
+sampler bug fixed, mid-training wandb curves will also be honest this
+time.
+
+**Also worth flagging — exp65c stack**: combine x0-prediction (exp65)
+with mid-aug + cross-attn (exp61). If x0 gives SSIM jump AND mid aug
+gives robustness back AND cross-attn provides arch quality, the stack
+could win everywhere. Three-knob stack is risky but the components are
+independent enough that orthogonal composition is plausible.
+
+---
+
 ---
 
 ## exp66 — wider model (mc=128) capacity test
 
-**Status: WIRED 2026-05-19**
+**Status: DONE 2026-05-20** — TIE with exp59 at 20k. Under-trained;
+verdict pending exp66b @ 80k.
 
 exp59 recipe with `--model-ch 128` instead of 88. Bumps all internal
 widths proportionally; total params ~102M (~2.1× exp59's 49M).
@@ -1184,6 +1582,461 @@ Single-flag delta vs exp59: `--model-ch 128`.
 A/B target — exp59 (val_portraits): face_lpips_sq=0.122.
 
 Script: `scripts/run_exp66_wider_mc128_at_exp59_recipe.sh`
+
+**Results vs exp59 (20k baseline, TIE across the board)**:
+
+| split | metric | exp59 (51.5M) | exp66 (102M) | Δ |
+|---|---|---|---|---|
+| val_portraits | face_lpips_sq | 0.122 | 0.126 | +3.3% (slight loss) |
+| val_portraits | face_lpips_vgg | 0.282 | 0.287 | +1.8% (tie) |
+| val_portraits | face_ssim | 0.546 | 0.543 | -0.5% (tie) |
+| val_portraits | whole lpips_sq | 0.166 | 0.168 | +1.2% (tie) |
+| val_portraits | whole ssim | 0.445 | 0.443 | -0.4% (tie) |
+| val_portraits | Δ_lpips_vgg | 0.035 | 0.037 | +5.7% (mild loss) |
+| legacy val | face_lpips_sq | 0.203 | 0.200 | -1.5% (tiny WIN) |
+| legacy val | face_lpips_vgg | 0.381 | 0.379 | tie |
+| legacy val | face_ssim | 0.598 | 0.600 | tie |
+| legacy val | whole lpips_sq | 0.149 | 0.148 | tie |
+| legacy val | Δ_lpips_vgg | 0.111 | 0.117 | +5.4% (mild loss) |
+
+**Classic under-trained signature**: +108% more params at the same
+20k step budget = ~half the gradient updates per param vs exp59. The
+extra capacity is sitting idle, not yet learning anything useful.
+Notable: exp66 didn't get *worse* than exp59 (just tied) — extra
+capacity is at least benign here, unlike exp64's AdaLN-Zero which
+regressed at the same step count.
+
+**Two outcomes possible at 80k**:
+- mc=128 finally fits the data → exp66b becomes the new canonical
+  capacity; we know "data-scale ceiling at 1k pairs / mc=88" extended
+  to "model-scale ceiling at 3k pairs / mc=128"
+- mc=128 still ties exp60 → 50M is the right size at our 3k data
+  scale, and capacity is genuinely not the bottleneck
+
+Either is a useful finding.
+
+---
+
+## exp66b — mc=128 at 80k (under-training retry)
+
+**Status: DONE 2026-05-20** — **under-training hypothesis WRONG**.
+102M loses to 51.5M even at full 80k. 50M is the right size for our
+3k data scale.
+
+Same recipe as exp66 (mc=128, exp59-equivalent stack), just 4× longer
+training. Doubles param count vs exp60 (101.8M vs 51.5M) so the 80k
+step budget gives roughly the same effective updates per param as
+exp60 at 80k — apples-to-apples capacity test.
+
+A/B target — exp60 (val_portraits, current quality canonical):
+- face_lpips_sq=0.0997, face_lpips_vgg=0.237, face_ssim=0.583
+- Δ_lpips_vgg=0.040
+
+Decision rule:
+- exp66b face_lpips_sq < 0.095 → mc=128 is the new size (clear win
+  on capacity)
+- 0.095 ≤ exp66b ≤ 0.105 → within noise of exp60; both work; mc=88
+  is the better-cost canonical
+- exp66b > 0.105 → mc=128 is over-capacity for our data; archive
+
+Risk: doubling model size also doubles training memory + slows each
+step ~2×. On Colab T4 this might mean 2-3 hours instead of 80 min.
+Verify the 4090 fits 102M @ bs=4 @ 256px before launching.
+
+Script: `scripts/run_exp66b_wider_mc128_at_80k.sh`
+
+**Results vs exp60 (mc=88 @ 80k, current quality canonical)**:
+
+| split | metric | exp60 (51.5M) | exp66b (102M) | Δ |
+|---|---|---|---|---|
+| val_portraits | **face_lpips_sq** | **0.0997** | 0.105 | **+5.3% LOSE** |
+| val_portraits | face_lpips_vgg | 0.237 | 0.248 | +4.6% LOSE |
+| val_portraits | face_ssim | 0.583 | 0.576 | -1.2% (tie) |
+| val_portraits | whole lpips_sq | 0.142 | 0.148 | +4.2% LOSE |
+| val_portraits | whole ssim | 0.460 | 0.454 | -1.3% (tie) |
+| val_portraits | **Δ_lpips_vgg** | 0.040 | 0.0505 | **+26% LOSE** |
+| legacy val | face_lpips_sq | 0.182 | 0.184 | +1.1% (tie) |
+| legacy val | face_ssim | 0.630 | 0.621 | -1.4% (tie) |
+| legacy val | Δ_lpips_vgg | 0.113 | 0.131 | +16% LOSE |
+
+**Under-training hypothesis: REFUTED.** Doubling params and giving the
+model 80k steps to fit them produced a model that **loses across the
+board** on quality metrics and badly loses on robustness (+16-26% on
+Δ_lpips_vgg). The clean "model > data" overfitting signature: more
+capacity fits training distribution better but generalizes worse.
+
+**Lesson**: 50M params (mc=88) is the right size for the 3k mixed
+dataset. Capacity is genuinely not the bottleneck at our data scale.
+To make mc=128 useful we'd need 10-15k+ training pairs, not 3k.
+
+**Implication for other "+more params" experiments**:
+- **exp64b (AdaLN-Zero @ 80k, +9.5M params)** prediction is now
+  weaker. If 50M extra params can't be saved by 80k training, 9.5M
+  is less likely to either. But the AdaLN modulation params are
+  *qualitatively different* from raw wider channels — they encode
+  time-conditional modulation that the additive `time_proj` baseline
+  encodes more crudely. So exp64b could still go either way.
+- **exp63 (PatchGAN @ 80k)** doesn't add G params, only D params for
+  the loss term — unaffected by this finding.
+
+**This is also a real-world note for future work**: when data is
+fixed, model size is bounded. Throwing more compute (steps × params)
+at a data-limited problem just learns the training distribution
+better, not the underlying task. Need more data, not more model.
+
+---
+
+## exp67 — SGDR 2-cycle LR schedule
+
+**Status: DONE 2026-05-20** — TIE at 20k (no plateau to escape).
+Pending exp67b @ 80k where the plateau argument actually applies.
+
+Default cosine LR smoothly decays lr_max=2e-4 → lr_min=1e-5 over the
+full post-warmup window. The model spends the last ~30% of training
+near lr_min, which often means it's stuck at whatever local minimum it
+found early and can't escape.
+
+**SGDR 2-cycle** (Loshchilov & Hutter 2016): split the post-warmup
+window into 2 cycles, each decaying lr_max → lr_min independently. At
+the midpoint the LR "warm restarts" back to lr_max, kicking the
+optimizer out of the local minimum.
+
+Single-flag delta vs exp59: `--lr-num-cycles 2`.
+
+Lit precedent: 1-3% improvement when training plateaus. exp52/exp60
+val curves show late-training plateau, so the upside is real.
+
+A/B target — exp59 (val_portraits): face_lpips_sq=0.122.
+
+Script: `scripts/run_exp67_sgdr_2cycle_at_exp59_recipe.sh`
+
+The trainer already supports this (`--lr-num-cycles`, `--lr-cycle-mult`
+flags exist; `cosine_lr` function implements SGDR correctly). exp67 is
+the first time we actually use the feature.
+
+If wins, the natural follow-up is exp67b at exp61's 80k recipe — the
+plateau is more pronounced at 80k than at 20k.
+
+**Results vs exp59 (clean TIE across the board)**:
+
+| split | metric | exp59 | exp67 | Δ |
+|---|---|---|---|---|
+| val_portraits | face_lpips_sq | **0.122** | **0.122** | 0% (exact tie) |
+| val_portraits | face_lpips_vgg | 0.282 | 0.284 | +0.7% (tie) |
+| val_portraits | face_ssim | **0.546** | **0.546** | 0% (exact tie) |
+| val_portraits | whole lpips_sq | 0.166 | 0.168 | +1.2% (tie) |
+| val_portraits | whole ssim | 0.445 | 0.447 | +0.4% (tie) |
+| val_portraits | Δ_lpips_vgg | 0.035 | 0.036 | +2.9% (tie) |
+| val_portraits | Δ_lpips_sq | 0.024 | 0.023 | -4.2% (tie/slight win) |
+| legacy val | face_lpips_sq | 0.203 | 0.205 | +1.0% (tie) |
+| legacy val | face_ssim | 0.598 | 0.600 | +0.3% (tie) |
+
+Every metric within ±1.5%. SGDR 2-cycle at 20k produced no measurable
+change in either direction.
+
+**Why TIE not WIN**: SGDR's mechanism is plateau escape via warm
+restart. At 20k steps, the model is still actively learning when
+training ends — there's no plateau to escape. The cosine baseline
+spends its final steps in the productive lr range, not stuck. The
+warm restart at step ~10250 just compressed the same productive lr
+profile into two halves, producing essentially the same optimization
+trajectory.
+
+**Where SGDR should actually help**: 80k+ runs where exp52/exp60 val
+curves visibly flatten in the last 30%. exp67b @ 80k is the proper
+test. exp67 @ 20k is inconclusive (tie, but mechanism didn't apply).
+
+**Emerging pattern across recent 20k experiments**:
+- exp64 (AdaLN-Zero): 20k LOSE (-7% on face_lpips_sq); maybe under-trained
+- exp66 (mc=128): 20k TIE; +108% params definitely under-trained
+- exp67 (SGDR 2-cycle): 20k TIE; mechanism doesn't apply at 20k
+
+Three different recipe variations, three "no signal at 20k". The
+interesting comparisons happen at 80k. **Future-me note**: when in
+doubt, just run at 80k; 20k filters out the "obvious wins like exp59
+cross-attn" but everything else is undertrained noise.
+
+---
+
+## exp65b — x0-prediction at 80k (promotion of 20k SSIM win)
+
+**Status: DONE 2026-05-20** — **NEW QUALITY CANONICAL**. Biggest
+single-exp quality win of the 3k era. Wins on every quality metric;
+ties exp60 on face_lpips_sq within noise. Robustness regression
+~20% (the one tradeoff).
+
+Promotion of exp65's 20k result (+26% SSIM, -5% face_lpips_vgg, tie
+on face_lpips_sq, +20% robustness regression). Same recipe with
+`--steps 80000` + 80k-tuned val intervals.
+
+Single-flag delta vs exp60 recipe: `--flow-prediction-type x0`.
+
+A/B target — exp60 (val_portraits): face_lpips_sq=0.0997, ssim=0.460,
+face_ssim=0.583, Δ_lpips_vgg=0.040.
+
+Decision rule:
+- face_lpips_sq < 0.10 AND ssim ≥ 0.55 → x0-pred wins on absolute
+  quality + retains SSIM jump. Could replace exp60 as quality
+  canonical.
+- face_lpips_sq within 5% of exp60 AND ssim still ~0.55+ → x0-pred
+  is the SSIM canonical; exp60 stays for face_lpips_sq.
+- face_lpips_sq > 0.108 (5%+ worse than exp60) → x0-pred doesn't
+  scale to 80k; close chapter.
+
+Bug-fix relevance: in-training panels for exp65 (the 20k run) were
+sampled by a buggy `_sample_from_source` that treated x0_hat as
+velocity — fixed 2026-05-20. exp65b's mid-training wandb val curves
+and panels will be honest.
+
+Script: `scripts/run_exp65b_x0_pred_at_80k.sh`
+
+**Results vs exp60 (former quality canonical)**:
+
+| split | metric | exp60 | **exp65b** | Δ |
+|---|---|---|---|---|
+| val_portraits | **face_lpips_sq** | 0.0997 | **0.0996** | NEW FLOOR (tie, -0.1%) |
+| val_portraits | face_lpips_vgg | 0.237 | **0.226** | **-4.6% WIN** |
+| val_portraits | face_ssim | 0.583 | **0.635** | **+8.9% WIN** |
+| val_portraits | whole lpips_sq | 0.142 | **0.137** | **-3.5% WIN** |
+| val_portraits | **whole ssim** | 0.460 | **0.593** | **+28.9% WIN (massive)** |
+| val_portraits | Δ_lpips_vgg | 0.040 | 0.047 | +17.5% LOSE |
+| legacy val | **face_lpips_sq** | 0.182 | **0.163** | **-10.4% WIN (huge)** |
+| legacy val | face_lpips_vgg | 0.349 | **0.309** | **-11.5% WIN** |
+| legacy val | face_ssim | 0.630 | **0.706** | **+12.1% WIN** |
+| legacy val | whole lpips_sq | 0.131 | **0.129** | -1.5% WIN |
+| legacy val | whole lpips_vgg | 0.259 | **0.248** | -4.2% WIN |
+| legacy val | whole ssim | 0.530 | **0.655** | **+23.6% WIN** |
+| legacy val | Δ_lpips_vgg | 0.113 | 0.137 | +21% LOSE |
+
+The exp65 @ 20k SSIM-jump prediction held at 80k: whole_ssim
+portraits +28.9% vs +25.6% at 20k. Both grew with training duration,
+which is the opposite pattern from exp64/66 ("more params" failures
+that didn't recover at 80k). x0-prediction is the right
+parameterization for this task.
+
+**face_lpips_sq legacy -10.4%** is the **biggest legacy face metric
+win of the entire 3k era** (exp50→52: -9%, exp35→exp52 was the prior
+record). x0-prediction generalizes — wins on both splits, especially
+the small-peripheral-face legacy split.
+
+**Updated canonical roles**:
+- **exp65b** = pure quality canonical (replaces exp60). Best
+  face_lpips_sq portraits (tied 0.0996), best face_lpips_vgg, best
+  SSIM across the board, best legacy face metrics.
+- **exp61** stays deployment canonical (still has the best Δ_lpips_vgg
+  at 0.025). x0-pred's +20% robustness regression is the cost of the
+  quality gain.
+- exp60 demoted to historical reference.
+
+**exp65c is the obvious next move**: stack x0-prediction (exp65b) +
+mid-aug (exp61 recipe) at 80k. If orthogonal composition holds (it
+did for exp59 + exp56 → exp61), the result would be:
+- ~0.10 face_lpips_sq portraits (x0-pred quality)
+- ~0.59-0.63 whole ssim portraits (x0-pred SSIM jump)
+- ~0.030 Δ_lpips_vgg portraits (mid-aug robustness recovered)
+- → best quality + best robustness in one model
+
+That would be the new SINGLE canonical.
+
+---
+
+## exp65c — STACK x0-prediction + mid-aug + cross-attn at 80k
+
+**Status: WIRED 2026-05-20**
+
+Stack of exp65b's x0-prediction win + exp61's mid-aug-for-robustness.
+Single-flag delta vs exp61: `--flow-prediction-type x0`.
+
+A/B targets (val_portraits):
+
+| | face_lpips_sq | whole_ssim | Δ_lpips_vgg |
+|---|---|---|---|
+| exp65b (quality canonical) | 0.0996 | 0.593 | 0.047 |
+| exp61 (deployment canonical) | 0.103 | 0.460 | **0.025** |
+| **exp65c (target if orthogonal)** | **~0.10** | **~0.59** | **~0.030** |
+
+Decision rule:
+- face_lpips_sq ≤ 0.103 AND Δ_lpips_vgg ≤ 0.032 → **NEW SINGLE
+  CANONICAL** (replaces both exp65b and exp61).
+- face_lpips_sq ≤ 0.103 AND Δ_lpips_vgg in (0.032, 0.040] → quality
+  canonical with reasonable robustness; replaces exp65b. exp61 stays
+  pure-robustness reference.
+- face_lpips_sq > 0.105 → mid-aug interferes with x0-pred. Keep
+  separate.
+- Δ_lpips_vgg > 0.040 → mid-aug didn't recover x0-pred's robustness
+  regression. Keep separate.
+
+Risk: x0-prediction's clean-pixel-anchored output might compose
+poorly with mid-aug's training-time corruption — the model trains
+to output clean targets from sometimes-corrupted sources, which is a
+harder dual-task than either alone. But cross-attn (exp59) + mid-aug
+(exp56) composed cleanly → exp61, so the precedent supports trying.
+
+Script: `scripts/run_exp65c_x0_pred_plus_mid_aug_80k.sh`
+
+**Why x0-prediction works** (post-hoc): x0-pred trains the model to
+output clean targets directly, so its outputs are anchored in clean
+pixel space — which SSIM rewards heavily. v-prediction (the legacy
+default) trains on velocity, which has different scales across t and
+spreads representational capacity across a broader output space. At
+50M params, the focused x0 target uses capacity more efficiently. The
+robustness regression is the trade — `v_hat = (x0_hat - x_t) / (1-t)`
+recovery is brittle to corrupted input.
+
+---
+
+## exp67b — SGDR 2-cycle LR at 80k (plateau escape test)
+
+**Status: DONE 2026-05-20** — plateau-escape hypothesis WRONG. Small
+consistent LOSE (~3-4% face metrics). Warm restart disrupts productive
+late-training refinement. LR-schedule axis closed.
+
+exp67 @ 20k was a clean TIE — SGDR's plateau-escape mechanism doesn't
+apply when there's no plateau (20k cosine still in productive lr
+regime). At 80k, exp52/exp60 val curves visibly flatten over the last
+30k steps; that's where SGDR is supposed to help.
+
+Single-flag delta vs exp60 recipe: `--lr-num-cycles 2`.
+
+Cycle math: warmup 500 → cosine to ~40k → warm-restart back to lr_max
+→ cosine to 80k. Two equal halves at 80k.
+
+A/B target — exp60 (val_portraits): face_lpips_sq=0.0997.
+
+Decision rule:
+- face_lpips_sq < 0.095 → SGDR breaks the plateau; promote and retest
+  on exp61 deployment recipe.
+- 0.095 ≤ face_lpips_sq ≤ 0.103 → within noise; cheap lever that
+  doesn't hurt, but doesn't justify recipe change.
+- > 0.103 → SGDR actively destabilizes (restart undoes late-training
+  refinement); document and park.
+
+Script: `scripts/run_exp67b_sgdr_2cycle_at_80k.sh`
+
+**Results vs exp60 (mc=88 + cross-attn + smooth cosine @ 80k)**:
+
+| split | metric | exp60 | exp67b | Δ |
+|---|---|---|---|---|
+| val_portraits | face_lpips_sq | **0.0997** | 0.104 | +4.3% LOSE |
+| val_portraits | face_lpips_vgg | 0.237 | 0.247 | +4.2% LOSE |
+| val_portraits | face_ssim | 0.583 | 0.574 | -1.5% (tie) |
+| val_portraits | whole lpips_sq | 0.142 | 0.147 | +3.5% LOSE |
+| val_portraits | Δ_lpips_vgg | 0.040 | 0.039 | -2.5% (slight win) |
+| legacy val | face_lpips_sq | 0.182 | 0.187 | +2.7% LOSE |
+| legacy val | face_lpips_vgg | 0.349 | 0.362 | +3.7% LOSE |
+| legacy val | face_ssim | 0.630 | 0.614 | -2.5% LOSE |
+| legacy val | Δ_lpips_vgg | 0.113 | 0.115 | +1.8% (tie) |
+
+**Plateau escape hypothesis REFUTED**: the late-training "plateau" in
+exp52/exp60 val curves wasn't a stuck local minimum — it was **productive
+late-training refinement**. The warm restart at step ~40k jumped lr back
+to 2e-4, partially undoing the refinement the smooth cosine had been
+doing. Net: small consistent regression across face metrics.
+
+The tiny robustness win (-2.5% on Δ_lpips_vgg) is within noise and
+doesn't compensate for the broad quality regression.
+
+**LR-schedule axis now closed** alongside the LR-value axis (exp68a).
+Combined finding:
+- **2e-4 single cosine** = well-calibrated default for canonical recipe
+- 2× LR (4e-4): catastrophic LOSE (+29% face_lpips_sq)
+- SGDR 2-cycle: small LOSE (+4% face_lpips_sq)
+
+The optimization side of the recipe is mature. Don't fight it.
+
+**Implications for what's still worth testing**:
+- **x0-prediction** (exp65b) — different optimization *target*, not
+  optimizer config. Real lever, +26% SSIM at 20k.
+- **PatchGAN diagnosis-fix** (exp63b) — adds an adversarial loss term
+  rather than changing the optimizer. Independent of LR findings.
+- **Data scale-up** — only real path forward at 50M + canonical recipe.
+
+What's NOT worth testing now: any further LR or schedule variants.
+The current `2e-4 + smooth cosine + warmup 500 + grad_clip 1.0` is
+the canonical configuration.
+
+---
+
+## exp68 — LR sweep (2×, 3×, 5× the long-standing 2e-4 default)
+
+**Status: 68a DONE 2026-05-20 — catastrophic LOSE. 68b/68c CANCELLED**
+(2× already cratered, higher LRs would be progressively worse).
+
+Motivation: lr=2e-4 has been the default since exp01 era and was never
+re-tuned for the modern arch (cross-attn + pyramid + FiLM + decoder
+attn). The "no signal at 20k" pattern across exp64/66/67 could be
+partially "optimizer not moving fast enough". Three variants probe
+the LR landscape:
+
+| variant | lr | warmup | grad_clip | risk |
+|---|---|---|---|---|
+| **exp68a** | 4e-4 (2×) | 1000 | 1.0 | low — typical safe bump |
+| **exp68b** | 6e-4 (3×) | 1500 | 1.0 | medium — upper edge of lit-typical |
+| **exp68c** | 1e-3 (5×) | 2000 | 2.0 (relaxed) | high — needs babysitting |
+
+Base recipe = exp59 (cross-attn @ H/8, minimal aug, 20k @ 256px bs=4).
+Single-flag-set delta per variant.
+
+**Decision matrix**:
+
+- 68a wins (face_lpips_sq < 0.118) + 68b also wins → LR ceiling > 3×;
+  promote 68b to 80k. exp52/60/61 all retrain at higher LR.
+- 68a wins + 68b ties → 2× is the sweet spot; promote 68a to 80k.
+- All three lose or tie → LR isn't the bottleneck. Stop here.
+- 68c diverges (loss NaN before step 5k) → 5× is too much at our
+  setup; kill early to save compute.
+
+10× (lr=2e-3) was considered and rejected — would need warmup ≥ 3000,
+grad_clip ≥ 4.0, and likely batch-size scaling (we're at bs=4). That's
+a recipe redesign, not a single-flag test. The 5× variant (68c) is the
+upper bound this sweep explores.
+
+Scripts:
+- `scripts/run_exp68a_lr_2x_at_exp59_recipe.sh`
+- `scripts/run_exp68b_lr_3x_at_exp59_recipe.sh`
+- `scripts/run_exp68c_lr_5x_at_exp59_recipe.sh`
+
+**For 68c specifically: watch the first 1-2k steps**. If train loss
+spikes / NaN / panels go to garbage, kill early; the higher-LR risk
+is mostly front-loaded into the warmup ramp.
+
+**Results — exp68a @ 20k vs exp59 (catastrophic LOSE)**:
+
+| split | metric | exp59 (lr=2e-4) | exp68a (lr=4e-4) | Δ |
+|---|---|---|---|---|
+| val_portraits | **face_lpips_sq** | 0.122 | **0.158** | **+29.5% LOSE** |
+| val_portraits | face_lpips_vgg | 0.282 | 0.344 | +22% LOSE |
+| val_portraits | face_ssim | 0.546 | 0.491 | -10% LOSE |
+| val_portraits | whole lpips_sq | 0.166 | 0.198 | +19% LOSE |
+| val_portraits | whole ssim | 0.445 | 0.393 | -12% LOSE |
+| val_portraits | **Δ_lpips_vgg** | 0.035 | 0.046 | **+31% LOSE** |
+| val_portraits | Δ_lpips_sq | 0.024 | 0.036 | +50% LOSE |
+| legacy val | face_lpips_sq | 0.203 | 0.218 | +7% LOSE |
+| legacy val | whole lpips_sq | 0.149 | 0.164 | +10% LOSE |
+| legacy val | Δ_lpips_vgg | 0.111 | 0.127 | +14% LOSE |
+
+**Verdict**: lr=2e-4 (default since exp01 era) is **already close to
+optimal** for our 50M conv UNet + LPIPS + bf16 setup. Even 2×
+doubling destabilizes training despite 2× longer warmup. The LR axis
+is closed.
+
+**Cancelling exp68b (3×) and exp68c (5×)** — would only get worse from
+here. If 2× cratered with +29% face_lpips_sq, 3× and 5× would either
+NaN-out or land somewhere completely useless. Saving the Colab budget.
+
+**Implication for the broader "no signal at 20k" question**: NOT a
+learning-rate problem. exp64/66/67's tied/lost outcomes at 20k come
+from the architectural-change-needs-more-data pattern (confirmed by
+exp64b/66b LOSING even at 80k), not from the optimizer being too slow.
+The 2e-4 default is genuinely well-tuned for the canonical recipe.
+
+**Closes the optimizer-side investigation**. Future LR experiments
+would need to consider:
+- Lower LR (1e-4? 5e-5?) — possibly underexplored, but exp01-25 era
+  ran 2e-4 and matured the recipe around it; going lower likely just
+  slows things down without quality gain.
+- Different optimizer entirely (Lion, Sophia, Shampoo) — bigger
+  project, low priority given the current 2e-4 + AdamW is well-fit.
 
 ---
 

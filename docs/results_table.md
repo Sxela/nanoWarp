@@ -54,9 +54,21 @@ Bold = best in column among 20k-step single-phase runs on legacy val.
 | exp58 (20k) | 3k mixed | minimal | exp35 + logit-normal t σ=1.0 | 51M | 0.162 | 0.306 | 0.492 | 0.223 | 0.398 | 0.576 | +0.114 |
 | exp58b (20k) | 3k mixed | minimal | exp35 + logit-normal t σ=1.5 | 51M | 0.153 | 0.296 | 0.507 | 0.204 | 0.379 | 0.596 | +0.113 |
 | exp59 (20k) | 3k mixed | minimal | exp35 + cross-attn cond @ H/8 | 51.5M | 0.149 | 0.294 | 0.512 | 0.203 | 0.381 | 0.598 | +0.111 |
+| exp62 (20k) | 3k mixed | minimal | exp35 + cross-attn (H/8+H/4) - source-in-stem | 49M | 0.150 | 0.298 | 0.521 | 0.205 | 0.386 | 0.609 | +0.120 |
+| exp64 (20k) | 3k mixed | minimal | exp35 + AdaLN-Zero everywhere (LOSE) | 58M | 0.152 | 0.297 | 0.516 | 0.206 | 0.385 | 0.614 | +0.120 |
+| exp64b (80k) | 3k mixed | minimal | exp35 + AdaLN @ 80k (LOSES to mc=88 — chapter closed) | 58M | 0.135 | 0.267 | 0.530 | 0.186 | 0.357 | 0.628 | +0.130 |
+| exp66 (20k) | 3k mixed | minimal | exp35 + mc=128 (TIE — under-trained) | 102M | 0.148 | 0.292 | 0.514 | 0.200 | 0.379 | 0.600 | +0.117 |
+| exp66b (80k) | 3k mixed | minimal | exp35 + mc=128 @ 80k (LOSE to mc=88 — overcapacity) | 102M | 0.132 | 0.261 | 0.526 | 0.184 | 0.354 | 0.621 | +0.131 |
+| **exp65 (20k)** | **3k mixed** | minimal | exp35 + x0-pred (huge SSIM win) | 51.5M | 0.148 | **0.281** | **0.623** | 0.188 | **0.344** | **0.674** | +0.133 |
+| **exp65b (80k)** | **3k mixed** | minimal | exp35 + x0-pred (**NEW QUALITY CANONICAL**) | 51.5M | **0.129** | **0.248** | **0.655** | **0.163** | **0.309** | **0.706** | +0.137 |
+| exp65c (80k) | 3k mixed | mid aug | exp35 + x0-pred + cross-attn (composition test) | 51.5M | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| exp67 (20k) | 3k mixed | minimal | exp35 + SGDR 2-cycle LR (TIE — no plateau at 20k) | 51.5M | 0.148 | 0.290 | 0.514 | 0.205 | 0.383 | 0.600 | +0.112 |
+| exp68a (20k) | 3k mixed | minimal | exp35 + lr=4e-4 (2× default — catastrophic LOSE) | 51.5M | 0.164 | 0.314 | 0.501 | 0.218 | 0.398 | 0.601 | +0.127 |
+| exp67b (80k) | 3k mixed | minimal | exp35 + SGDR 2-cycle @ 80k (LOSES — restart disrupts refinement) | 51.5M | 0.133 | 0.265 | 0.525 | 0.187 | 0.362 | 0.614 | +0.115 |
 | **exp60 (80k)** | **3k mixed** | minimal | exp35 + cross-attn (**quality canonical**) | 51.5M | **0.131** | **0.259** | 0.530 | **0.182** | **0.349** | 0.630 | +0.113 |
 | **exp61 (80k)** | **3k mixed** | mid aug | exp35 + cross-attn (**deployment canonical**) | 51.5M | 0.137 | 0.264 | 0.533 | 0.189 | 0.363 | **0.632** | **+0.078** |
-| exp62 (20k) | 3k mixed | minimal | exp35 + cross-attn (H/8+H/4) - source-in-stem | 49M | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| exp63 (20k adv) | 3k mixed | mid aug | exp61 + PatchGAN gan_w=0.02 (within-noise drift) | 51.5M+D | 0.136 | 0.263 | 0.533 | 0.193 | 0.367 | 0.625 | +0.076 |
+| exp63b (20k adv) | 3k mixed | mid aug | exp61 + PatchGAN gan_w=0.05 + forced D (retry) | 51.5M+D | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
 
 † exp52 legacy whole-image metrics weren't recorded at final-val time
 (the captain's log only captured face metrics); Δ estimated from
@@ -97,11 +109,21 @@ Established 2026-05-16. Old runs validated retroactively on this split.
 | **exp59 (20k)** | **3k mixed** | exp35 arch + cross-attn cond @ H/8 (+500k params) | **0.122** | 0.282 | 0.546 | 0.166 | 0.445 | **+0.035** |
 | **exp60 (80k)** | **3k mixed** | exp35 + cross-attn (**quality canonical**, first sub-0.10) | **0.0997** | **0.237** | 0.583 | **0.142** | 0.460 | +0.040 |
 | **exp61 (80k)** | **3k mixed** | exp35 arch + cross-attn + mid aug (STACK, **new canonical**) | 0.103 | **0.242** | **0.581** | 0.148 | 0.460 | **+0.025** |
-| exp62 (20k) | 3k mixed | exp35 + cross-attn (H/8 + H/4) + NO source-in-stem | TBD | TBD | TBD | TBD | TBD | TBD |
-| exp63 (20k) | 3k mixed | exp61 + PatchGAN (gan_w=0.02, adaptive G/D) | TBD | TBD | TBD | TBD | TBD | TBD |
-| exp64 (20k) | 3k mixed | exp59 + AdaLN-Zero time conditioning (DiT-style) | TBD | TBD | TBD | TBD | TBD | TBD |
-| exp65 (20k) | 3k mixed | exp59 + x0-prediction (instead of velocity) | TBD | TBD | TBD | TBD | TBD | TBD |
-| exp66 (20k) | 3k mixed | exp59 + model_ch=128 (102M params capacity test) | TBD | TBD | TBD | TBD | TBD | TBD |
+| exp62 (20k) | 3k mixed | exp35 + cross-attn (H/8 + H/4) + NO source-in-stem | **0.119** | **0.278** | 0.554 | 0.165 | 0.449 | +0.041 |
+| exp63 (20k adv) | 3k mixed | exp61 + PatchGAN gan_w=0.02 (within-noise drift, NOT canonical) | 0.101 | 0.239 | 0.583 | 0.146 | 0.461 | +0.024 |
+| exp63b (20k adv) | 3k mixed | exp61 + PatchGAN gan_w=0.05 + forced D updates (diagnosis-fix retry) | TBD | TBD | TBD | TBD | TBD | TBD |
+| exp64 (20k) | 3k mixed | exp59 + AdaLN-Zero time conditioning (DiT-style, +9.5M; LOSE) | 0.131 | 0.300 | 0.534 | 0.176 | 0.433 | +0.048 |
+| exp64b (80k) | 3k mixed | exp59 + AdaLN-Zero @ 80k — LOSES (+11% face_lpips_sq, +46% Δ) | 0.111 | 0.261 | 0.565 | 0.154 | 0.446 | +0.0586 |
+| **exp65 (20k)** | **3k mixed** | exp59 + x0-prediction (huge SSIM win, robustness regress) | 0.121 | **0.269** | **0.587** | 0.163 | **0.559** | +0.042 |
+| **exp65b (80k)** | **3k mixed** | exp65 @ 80k (**NEW QUALITY CANONICAL** — x0-pred wins on every quality metric) | **0.0996** | **0.226** | **0.635** | 0.137 | **0.593** | +0.047 |
+| exp65c (80k) | 3k mixed | STACK x0-pred + mid-aug + cross-attn (exp65b + exp61 composition test) | TBD | TBD | TBD | TBD | TBD | TBD |
+| exp67b (80k) | 3k mixed | exp67 @ 80k — SGDR 2-cycle LOSES (warm restart disrupts late-training) | 0.104 | 0.247 | 0.574 | 0.147 | 0.452 | +0.039 |
+| exp66 (20k) | 3k mixed | exp59 + model_ch=128 (102M params, TIE at 20k — under-trained) | 0.126 | 0.287 | 0.543 | 0.168 | 0.443 | +0.037 |
+| exp66b (80k) | 3k mixed | exp66 @ 80k — mc=128 LOSES to mc=88 (under-training refuted) | 0.105 | 0.248 | 0.576 | 0.148 | 0.454 | +0.0505 |
+| exp67 (20k) | 3k mixed | exp59 + SGDR 2-cycle LR (TIE — no plateau to escape at 20k) | 0.122 | 0.284 | 0.546 | 0.168 | 0.447 | +0.036 |
+| exp68a (20k) | 3k mixed | exp59 + lr=4e-4 (2× default — CATASTROPHIC LOSE, +29% face_lpips_sq) | 0.158 | 0.344 | 0.491 | 0.198 | 0.393 | +0.046 |
+| exp68b (20k) | 3k mixed | exp59 + lr=6e-4 (3×) — CANCELLED (2× already cratered) | — | — | — | — | — | — |
+| exp68c (20k) | 3k mixed | exp59 + lr=1e-3 (5×) — CANCELLED (2× already cratered) | — | — | — | — | — | — |
 
 ## Cross-domain val (FFHQ-only-trained on legacy val)
 
