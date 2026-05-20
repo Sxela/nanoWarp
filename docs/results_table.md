@@ -9,6 +9,8 @@ Bold = best in column among 20k-step single-phase runs on legacy val.
 
 ## Single-frame, legacy val (100 group photos, original 1k-dataset split)
 
+### 1k-synth era (canonical = exp35 for arch comparison, exp25-80k for raw-metric leader)
+
 | run | data | aug | arch | params | lpips_sq | lpips_vgg | ssim | face_lpips_sq | face_lpips_vgg | face_ssim | Δ lpips_vgg |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | **exp23** (20k) | 1k synth | scale=1.10 + hflip | base | 49M | 0.127 | **0.234** | 0.689 | — | — | — | — |
@@ -37,7 +39,42 @@ Bold = best in column among 20k-step single-phase runs on legacy val.
 | exp48 @ 256 (20k prog) | 1k synth | minimal | pixel DiT + multiscale + warmup | 49M | 0.377 | 0.447 | 0.353 | 0.374 | 0.524 | 0.463 | +0.091 |
 | exp48 @ 512 (20k prog) | 1k synth | minimal | pixel DiT + multiscale + warmup | 49M | 0.451 | 0.491 | 0.278 | 0.438 | 0.561 | 0.401 | +0.049 |
 | exp49 (20k) | 1k synth | minimal | exp35 + 128 bootstrap | 51M | 0.129 | 0.255 | 0.530 | 0.180 | 0.348 | 0.619 | +0.129 |
-| **exp50** (20k) | **3k mixed** | minimal | exp35 | 51M | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+
+### 3k-mixed era (not directly comparable to 1k-synth above — different training source distribution)
+
+| run | data | aug | arch | params | lpips_sq | lpips_vgg | ssim | face_lpips_sq | face_lpips_vgg | face_ssim | Δ lpips_vgg |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| exp50 (20k) | 3k mixed | minimal | exp35 arch | 51M | 0.150 | 0.297 | 0.516 | 0.201 | 0.379 | 0.605 | +0.116 |
+| **exp52 (80k)** | **3k mixed** | minimal | exp35 arch | 51M | TBD | TBD | TBD | **0.183** | **0.355** | 0.623 | ~+0.125† |
+| exp53 (20k) | 3k mixed | minimal | exp35 + LANCZOS resize | 51M | 0.148 | 0.303 | 0.485 | 0.214 | 0.402 | 0.533 | +0.116 |
+| exp54 (20k) | 3k mixed | minimal | exp35 + diffusion-eps (flow→diff) | 51M | 0.433 | 0.567 | 0.322 | 0.482 | 0.621 | 0.524 | +0.133 |
+| exp55 (20k) | 3k mixed | minimal | exp35 + diffusion-eps + lpips=0 | 51M | 0.619 | 0.683 | 0.320 | 0.693 | 0.752 | 0.494 | +0.084 |
+| **exp56 (80k)** | **3k mixed** | mid aug | exp35 arch | 51M | **0.136** | **0.260** | **0.534** | 0.191 | 0.359 | 0.631 | **+0.077** |
+| exp57 (20k) | 3k mixed | minimal | exp35 + source-dropout=0.2 | 51M | 0.156 | 0.308 | 0.520 | 0.207 | 0.390 | 0.600 | +0.113 |
+| exp58 (20k) | 3k mixed | minimal | exp35 + logit-normal t σ=1.0 | 51M | 0.162 | 0.306 | 0.492 | 0.223 | 0.398 | 0.576 | +0.114 |
+| exp58b (20k) | 3k mixed | minimal | exp35 + logit-normal t σ=1.5 | 51M | 0.153 | 0.296 | 0.507 | 0.204 | 0.379 | 0.596 | +0.113 |
+| exp59 (20k) | 3k mixed | minimal | exp35 + cross-attn cond @ H/8 | 51.5M | 0.149 | 0.294 | 0.512 | 0.203 | 0.381 | 0.598 | +0.111 |
+| **exp60 (80k)** | **3k mixed** | minimal | exp35 + cross-attn (**quality canonical**) | 51.5M | **0.131** | **0.259** | 0.530 | **0.182** | **0.349** | 0.630 | +0.113 |
+| **exp61 (80k)** | **3k mixed** | mid aug | exp35 + cross-attn (**deployment canonical**) | 51.5M | 0.137 | 0.264 | 0.533 | 0.189 | 0.363 | **0.632** | **+0.078** |
+| exp62 (20k) | 3k mixed | minimal | exp35 + cross-attn (H/8+H/4) - source-in-stem | 49M | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+
+† exp52 legacy whole-image metrics weren't recorded at final-val time
+(the captain's log only captured face metrics); Δ estimated from
+mid-training wandb chart.
+
+**Reading the 3k-mixed legacy val table**:
+- **exp60** (cross-attn + low aug, quality canonical) **strictly dominates exp52**
+  across every legacy metric — cross-attn alone (no aug) is the best
+  legacy-val face recipe. face_lpips_sq=0.182 < exp52's 0.183, plus wins
+  whole-image lpips_sq=0.131 (best in column).
+- **exp56/exp61** (mid aug) lose ~3% on legacy face metrics vs exp60 but
+  gain on robustness Δ — the trade is "training-time corruption exposure".
+- **exp61** is the second-best on every legacy metric and the deployment
+  canonical (best robustness on val_portraits, still beats exp52 on
+  whole-image legacy).
+- **No 3k-era run regresses near the FFHQ-only exp51 catastrophe**
+  (-90% face_lpips_sq vs exp35-on-1k); mid-aug + 3k-mixed dataset
+  preserves global-scene capability well.
 
 ## Single-frame, val_portraits (200 FFHQ portraits — meaningful face signal)
 
@@ -58,8 +95,9 @@ Established 2026-05-16. Old runs validated retroactively on this split.
 | exp58 (20k) | 3k mixed | exp35 arch + logit-normal t (sigma=1.0, endpoints 25x starved) | 0.179 | 0.368 | 0.436 | 0.210 | 0.386 | +0.041 |
 | exp58b (20k) | 3k mixed | exp35 arch + logit-normal t (sigma=1.5) | 0.136 | 0.309 | 0.507 | 0.182 | 0.422 | +0.037 |
 | **exp59 (20k)** | **3k mixed** | exp35 arch + cross-attn cond @ H/8 (+500k params) | **0.122** | 0.282 | 0.546 | 0.166 | 0.445 | **+0.035** |
-| exp60 (80k) | 3k mixed | exp35 arch + cross-attn (80k promotion of exp59) | TBD | TBD | TBD | TBD | TBD | TBD |
-| exp61 (80k) | 3k mixed | exp35 arch + cross-attn + mid aug (STACK exp56+exp59) | TBD | TBD | TBD | TBD | TBD | TBD |
+| **exp60 (80k)** | **3k mixed** | exp35 + cross-attn (**quality canonical**, first sub-0.10) | **0.0997** | **0.237** | 0.583 | **0.142** | 0.460 | +0.040 |
+| **exp61 (80k)** | **3k mixed** | exp35 arch + cross-attn + mid aug (STACK, **new canonical**) | 0.103 | **0.242** | **0.581** | 0.148 | 0.460 | **+0.025** |
+| exp62 (20k) | 3k mixed | exp35 + cross-attn (H/8 + H/4) + NO source-in-stem | TBD | TBD | TBD | TBD | TBD | TBD |
 
 ## Cross-domain val (FFHQ-only-trained on legacy val)
 

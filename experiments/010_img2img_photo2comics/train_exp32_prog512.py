@@ -411,8 +411,19 @@ def parse_args():
     p.add_argument("--use-cross-attn-cond", action="store_true",
                    help="Add cross-attention conditioning at the H/8 decoder level "
                         "(source pyramid feature as KV, decoder activation as Q). Adds "
-                        "~620k params. Requires --use-source-pyramid. Zero-init output "
+                        "~500k params. Requires --use-source-pyramid. Zero-init output "
                         "proj -> identity at init; auto-detected from state_dict in ckpt.py.")
+    p.add_argument("--use-cross-attn-cond-h4", action="store_true",
+                   help="Add a second cross-attention conditioning at the H/4 decoder "
+                        "level (4x more tokens than H/8 -> ~16x SDPA compute, ~500k params). "
+                        "Multi-scale source conditioning when paired with --use-cross-attn-cond.")
+    p.add_argument("--no-source-in-stem", action="store_true",
+                   help="Drop the source channels from the input convolution. The model "
+                        "still gets source signal via SourcePyramid + FiLM + cross-attn "
+                        "(if enabled). Requires --use-source-pyramid (otherwise the model "
+                        "has no source conditioning at all). In flow matching, x_t already "
+                        "contains source at t=0 via the interpolant, so the in-stem concat "
+                        "may be redundant with pyramid conditioning.")
     p.add_argument("--use-decoder-attn", action="store_true",
                    help="Mirror encoder attn on the decoder side: BottleneckAttention "
                         "at the same resolutions (attn_resolutions) operating on decoder "
@@ -765,7 +776,11 @@ def save_checkpoint(model, ema, method_cfg, args, step, path):
     # (rather than exposing via CLI). Save them explicitly so validate.py and
     # downstream loaders don't have to infer them from state_dict shapes.
     config = dict(vars(args))
-    config.setdefault("source_in_stem", True)
+    # source_in_stem reflects the actual constructor value used (default True,
+    # opt-out via --no-source-in-stem). ckpt.py prefers this field over
+    # state_dict shape inference (the in_conv weight shape carries the same
+    # info as a fallback).
+    config["source_in_stem"] = not getattr(args, "no_source_in_stem", False)
     config.setdefault("no_source_encoder", True)   # use_source_encoder = not no_source_encoder
     config.setdefault("upsample_type", "resize_conv")
     config.setdefault("image_size", 512)            # construction-time size (model handles any input)
@@ -844,7 +859,7 @@ def main():
         model = Img2ImgDiffusionUNet(
             model_ch=args.model_ch,
             pretrained_source_encoder=False,
-            source_in_stem=True,
+            source_in_stem=not args.no_source_in_stem,
             use_source_encoder=False,
             upsample_type="resize_conv",
             attn_resolutions=attn_res,
@@ -855,6 +870,7 @@ def main():
             num_dit_blocks=args.num_dit_blocks,
             dit_mlp_ratio=args.dit_mlp_ratio,
             use_cross_attn_cond=args.use_cross_attn_cond,
+            use_cross_attn_cond_h4=args.use_cross_attn_cond_h4,
         ).to(device)
 
     total = sum(p.numel() for p in model.parameters())

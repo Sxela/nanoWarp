@@ -276,13 +276,19 @@ class Img2ImgDiffusionUNet(nn.Module):
         num_dit_blocks: int = 4,
         dit_mlp_ratio: float = 4.0,
         use_cross_attn_cond: bool = False,
+        use_cross_attn_cond_h4: bool = False,
     ):
         super().__init__()
         if upsample_type not in ("resize_conv", "pixel_shuffle"):
             raise ValueError(f"upsample_type must be 'resize_conv' or 'pixel_shuffle', got {upsample_type!r}")
         if color_space not in ("srgb", "linear_rgb"):
             raise ValueError(f"color_space must be 'srgb' or 'linear_rgb', got {color_space!r}")
-        if not use_source_encoder:
+        if not use_source_encoder and not source_in_stem and not use_source_pyramid:
+            # No source signal anywhere — at least one of these must provide it.
+            # Older callers (pre-pyramid) relied on the silent fallback to
+            # source_in_stem=True; that's still the safe default, but with
+            # pyramid+cross-attn we now have a separate source pathway and
+            # source_in_stem can be turned off explicitly.
             source_in_stem = True
         self.use_source_encoder = use_source_encoder
         self.source_in_stem = source_in_stem
@@ -467,9 +473,18 @@ class Img2ImgDiffusionUNet(nn.Module):
                 self.cross_attn_dec4 = CrossAttnCond(target_ch=c3, cond_ch=c4)
             else:
                 self.cross_attn_dec4 = None
+            # Optional second cross-attn at H/4 decoder level. 4x more tokens
+            # than H/8 (64x64=4096 vs 32x32=1024) -> ~16x SDPA compute, but
+            # same ~500k param cost (Q/K/V projections share dim). Adds
+            # multi-scale source conditioning when paired with the H/8 block.
+            if use_cross_attn_cond_h4:
+                self.cross_attn_dec3 = CrossAttnCond(target_ch=c3, cond_ch=c3)
+            else:
+                self.cross_attn_dec3 = None
         else:
             self.source_pyramid = None
             self.cross_attn_dec4 = None
+            self.cross_attn_dec3 = None
             self.film_dec4 = None
             self.film_dec3 = None
             self.film_dec2 = None
@@ -584,6 +599,8 @@ class Img2ImgDiffusionUNet(nn.Module):
         x = self.dec3(torch.cat([x, h3], dim=1), t_emb)
         if self.attn_dec3 is not None: x = self.attn_dec3(x)
         x = _film(x, self.film_dec3, 2)   # H/4 source feat
+        if self.cross_attn_dec3 is not None and pyr_feats is not None:
+            x = self.cross_attn_dec3(x, pyr_feats[2])
         x = _ta(x, self.tattn_dec3)
         x = self.up2(x)
         x = self.dec2(torch.cat([x, h2], dim=1), t_emb)

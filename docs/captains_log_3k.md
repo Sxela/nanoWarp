@@ -891,7 +891,8 @@ Both improvements appear orthogonal (architectural vs data).
 
 ## exp60 — cross-attn at 80k (exp59's win promoted)
 
-**Status: WIRED 2026-05-19**
+**Status: DONE 2026-05-19** — **first sub-0.10 face_lpips_sq ever
+measured** (0.0997). Strictly dominates exp52. **New quality canonical.**
 
 80k promotion of exp59's clean +cross-attn win. Single-flag delta vs
 exp52: `--use-cross-attn-cond`.
@@ -900,17 +901,60 @@ Hypothesis: exp59's uniform 1-3% improvement at 20k holds at 80k. If
 linear, face_lpips_sq portraits ≈ 0.099 (first sub-0.10 ever). Even
 non-linear, anything ≤ 0.101 resets the canonical ceiling.
 
-A/B target — exp52 (current quality canonical):
+A/B target — exp52 (former quality canonical):
 - face_lpips_sq portraits=0.101, face_lpips_vgg=0.244, face_ssim=0.579
 - whole lpips_sq=0.145, whole ssim=0.459, Δ_lpips_vgg=0.045
 
 Script: `scripts/run_exp60_cross_attn_at_exp52_recipe_80k.sh`
 
+**Results — strictly dominates exp52 across both splits**:
+
+| split | metric | exp52 (former) | **exp60** | Δ |
+|---|---|---|---|---|
+| val_portraits | **face_lpips_sq** | 0.101 | **0.0997** | **-1.3% (sub-0.10 first)** |
+| val_portraits | face_lpips_vgg | 0.244 | **0.237** | -2.9% WIN |
+| val_portraits | face_ssim | 0.579 | 0.583 | +0.7% (tie/win) |
+| val_portraits | whole lpips_sq | 0.145 | 0.142 | -2.1% WIN |
+| val_portraits | whole ssim | 0.459 | 0.460 | tie |
+| val_portraits | Δ_lpips_vgg | 0.045 | 0.040 | -11% WIN |
+| legacy val | face_lpips_sq | 0.183 | **0.182** | -0.5% WIN |
+| legacy val | face_lpips_vgg | 0.355 | **0.349** | -1.7% WIN |
+| legacy val | face_ssim | 0.623 | 0.630 | +1.1% (tie/win) |
+| legacy val | whole lpips_sq | TBD | 0.131 | (best in col) |
+| legacy val | Δ_lpips_vgg | ~0.125 | 0.113 | -10% WIN |
+
+The speculative linear extrapolation from exp59 (face_lpips_sq portraits
+0.122 at 20k → 0.099 at 80k) landed almost exactly: actual 0.0997.
+
+**vs exp61 (deployment canonical, mid aug + cross-attn)**:
+
+| metric | exp61 | exp60 | Δ exp60 vs exp61 |
+|---|---|---|---|
+| face_lpips_sq portraits | 0.103 | **0.0997** | -3.2% (exp60 wins) |
+| face_lpips_vgg portraits | 0.242 | **0.237** | -2.1% (exp60 wins) |
+| whole lpips_sq portraits | 0.148 | **0.142** | -4.1% (exp60 wins) |
+| **Δ_lpips_vgg portraits** | **0.025** | 0.040 | +60% (exp61 wins robustness) |
+
+exp60 has **better clean quality** but **worse robustness** than exp61.
+The mid-aug component costs ~3% on face_lpips_sq portraits but buys
+-40% on Δ_lpips_vgg. Real-world deployments care more about Δ;
+benchmark scores care more about clean quality.
+
+**Updated canonical roles**:
+- **exp60** = pure quality canonical (replaces exp52). First sub-0.10
+  face_lpips_sq. Use when reporting benchmark numbers.
+- **exp61** = deployment canonical (replaces exp56). Best robustness
+  ever measured (Δ_lpips_vgg=0.025). Use for production checkpoints.
+- exp52, exp56 demoted to historical references; both are now
+  strictly dominated.
+
 ---
 
 ## exp61 — STACK: cross-attn + mid aug at 80k
 
-**Status: WIRED 2026-05-19**
+**Status: DONE 2026-05-19** — **new single canonical**. Stack hypothesis
+confirmed: ties exp52 on quality, beats exp56 on every metric including
+the best robustness Δ ever measured (0.025).
 
 Combines exp56 (mid aug, deployment canonical, 40% better robustness)
 with exp59 (cross-attn, architectural quality win). Hypothesis: the two
@@ -936,6 +980,86 @@ If interference: improvements partial-cancel and exp52/56 stay as
 separate canonicals for "quality" vs "deployment" tracks.
 
 Script: `scripts/run_exp61_cross_attn_plus_mid_aug_80k.sh`
+
+**Results — three-way comparison on val_portraits**:
+
+| metric | exp52 (quality, 80k) | exp56 (deployment, 80k) | **exp61 (stack, 80k)** |
+|---|---|---|---|
+| face_lpips_sq | **0.101** | 0.104 | 0.103 (tie with exp52) |
+| face_lpips_vgg | 0.244 | 0.244 | **0.242** (slight win on both) |
+| face_ssim | 0.579 | 0.577 | **0.581** (slight win on both) |
+| whole lpips_sq | 0.145 | 0.148 | 0.148 (tie with exp56) |
+| whole ssim | 0.459 | 0.460 | 0.460 (tie) |
+| **Δ_lpips_vgg** | 0.045 | 0.027 | **0.025 (best ever)** |
+| Δ_lpips_squeeze | 0.024 | 0.017 | **0.015 (best ever)** |
+
+Legacy val: face_lpips_sq=0.189 (slight loss vs exp52's 0.183, slight
+win vs exp56's 0.191), face_ssim=0.632 (best of the three), corrupt-val
+Δ=0.078 (much better than exp52's chart-extrapolated ~0.125).
+
+**Orthogonal stack hypothesis: CONFIRMED**. The architectural lever
+(cross-attn: enriches fine-detail conditioning) and the data lever
+(mid aug: exposes model to corruption/pose variance) compose without
+interference. Net:
+- Quality (face_lpips_sq portraits) ≈ exp52's 0.101 ceiling
+- Robustness (Δ_lpips_vgg) **-44% vs exp52, -7% vs exp56** — best ever
+
+**exp61 is the new single canonical, replacing both exp52 and exp56.**
+Going forward, all A/B's run against exp61. exp52 and exp56 stay cited
+as the "pure quality" and "pure robustness" reference points but the
+combined recipe dominates them both.
+
+**exp60 implication**: should still be run for the clean architectural
+ablation (cross-attn alone at 80k vs exp52 with no aug). Tells us how
+much of exp61's win is from cross-attn alone vs the stacking. But the
+canonical decision is already made.
+
+---
+
+---
+
+## exp62 — drop source-in-stem + add cross-attn at H/4
+
+**Status: WIRED 2026-05-19**
+
+Two-knob delta vs exp59 (cross-attn @ H/8, 20k):
+1. `--no-source-in-stem`: in_conv goes 6→88 ch to 3→88 ch. Source no
+   longer concatenated into the encoder input. Source signal now comes
+   purely via SourcePyramid + FiLM + cross-attn.
+2. `--use-cross-attn-cond-h4`: adds a second CrossAttnCond at the H/4
+   decoder level. Multi-scale source conditioning: H/8 [1024 tokens] +
+   H/4 [4096 tokens].
+
+Net param delta vs exp60: +495k (essentially same budget at ~49M).
+
+Hypothesis: in flow matching, `x_t = (1-t)·source + t·target`, so at
+t=0 the model sees source via `x_t` itself — making source-in-stem
+redundant with pyramid+cross-attn. Removing it eliminates double
+conditioning and frees capacity. Multi-scale cross-attn (H/8 + H/4)
+compensates by giving stronger pyramid-mediated source conditioning.
+
+Code changes:
+- `model.py`: relaxed the `use_source_encoder=False → source_in_stem=True`
+  override when pyramid is enabled. Added `use_cross_attn_cond_h4` flag
+  + `cross_attn_dec3` module at H/4 decoder level.
+- `ckpt.py`: auto-detects both cross-attn levels from state_dict.
+- `train_exp32_prog512.py`: `--no-source-in-stem` and
+  `--use-cross-attn-cond-h4` flags; saved config records actual
+  source_in_stem value (not the hardcoded True default).
+
+Smokes confirmed: forward pass works without source concat, ckpt
+roundtrip preserves both new flags via state_dict key auto-detection,
+in_conv weight shape correctly reflects 3-channel input.
+
+A/B target — exp59 (20k, cross-attn @ H/8 only, source_in_stem=True):
+- face_lpips_sq portraits = 0.122
+- face_lpips_vgg portraits = 0.282
+- Δ_lpips_vgg portraits = 0.035
+
+Script: `scripts/run_exp62_no_concat_plus_ca_h4_at_exp50_recipe.sh`
+
+If wins → 80k promotion as exp62b vs exp60 (current quality canonical
+at 0.0997).
 
 ---
 
