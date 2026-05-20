@@ -21,10 +21,10 @@ LPIPS-VGG 0.2). All weights trainable (no freeze).
 ```bash
 OUTDIR=out/exp31_corrupt512_$(date +%Y%m%d_%H%M%S)
 mkdir -p $OUTDIR
-PYTHONPATH=. \
+PYTHONPATH=/tmp/extpkgs2:/home/researcher/workspace/nanoWarp \
 TORCH_HOME=/tmp/torch_home \
 MPLCONFIGDIR=/tmp/mplconfig \
-WANDB_API_KEY=$WANDB_API_KEY \
+WANDB_API_KEY=wandb_v1_... \
 WANDB_CACHE_DIR=/tmp/wandb_cache \
 WANDB_CONFIG_DIR=/tmp/wandb_config \
 python3 experiments/010_img2img_photo2comics/train_exp31_corrupt512.py \

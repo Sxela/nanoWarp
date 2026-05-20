@@ -37,9 +37,9 @@ Source-only degradation (80% of samples, gated by clean_prob=0.2):
 ```bash
 OUTDIR=out/exp32_prog512_$(date +%Y%m%d_%H%M%S)
 mkdir -p $OUTDIR
-PYTHONPATH=. \
+PYTHONPATH=/tmp/extpkgs2:/home/researcher/workspace/nanoWarp \
 TORCH_HOME=/tmp/torch_home \
-WANDB_API_KEY=$WANDB_API_KEY \
+WANDB_API_KEY=wandb_v1_... \
 WANDB_CACHE_DIR=/tmp/wandb_cache \
 WANDB_CONFIG_DIR=/tmp/wandb_config \
 MPLCONFIGDIR=/tmp/mplconfig \

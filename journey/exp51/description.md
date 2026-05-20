@@ -35,20 +35,3 @@ Final val on two splits:
    → fine-tune on mixed) is still open if face quality stalls again.
 
 ---
-
-## Open follow-ups (3k era)
-
-- **exp52 = exp50 × 80k steps** — natural next move now that data
-  scale-up worked. exp25-80k extension was the legacy-era big lift;
-  same pattern at the new scale should compound.
-- **More diverse real-photo sources**: Unsplash people, Places365
-  with people-filter, AFW/IJB-C in-the-wild faces. Currently FFHQ
-  alone biases toward studio-lit Western 25-35yo portraits.
-- **Curriculum option** (deferred): if portrait quality stalls below
-  some threshold, start from exp51's FFHQ-only checkpoint and
-  fine-tune on the 3k mixed set. Might give exp50-on-FFHQ quality
-  *and* exp50-on-legacy capability simultaneously.
-- **In-the-wild face val split**: a third val with small / off-center /
-  partially-occluded faces, real photos. Currently no val covers this
-  honestly; legacy val is group photos but skewed toward peripheral
-  subjects.

@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>exp59 architecture — + cross-attention conditioning at H/8 decoder level</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         max-width: 980px; margin: 32px auto; padding: 0 16px; color: #1d1d1f; }
+  h1 { font-size: 18px; margin: 0 0 4px 0; }
+  .subtitle { color: #555; font-size: 13px; }
+  .arch-box { background: white; border: 1px solid #e5e5e5; border-radius: 8px;
+               padding: 14px; margin: 16px 0; }
+  svg { max-width: 100%; height: auto; display: block; }
+  .meta dt { font-weight: 600; margin-top: 6px; font-size: 13px; }
+  .meta dd { margin: 2px 0 6px 0; font-family: ui-monospace, monospace; font-size: 12px; }
+</style>
+</head>
+<body>
+<h1>exp59 architecture — + cross-attention conditioning at H/8 decoder level</h1>
+<div class="subtitle">rectified flow matching + LPIPS aux · this file is emitted only when arch changed vs the previous experiment</div>
+
+<p style="font-size:12px;color:#555;">Inherits from previous architecture; see <a href="../exp47/architecture.html">exp47/architecture.html</a> for the prior state.</p>
+
+<div class="arch-box">
+<svg viewBox="0 0 850 454" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, monospace" font-size="11">
+  <text x="20" y="30" font-size="14" font-weight="700">exp59 architecture — + cross-attention conditioning at H/8 decoder level</text>
+  <text x="20" y="50" font-size="11" fill="#555">rectified flow matching + LPIPS aux · mc=88 · attn_res=[16, 32, 64] · upsample=resize_conv · in_conv=6→88 ch (src+noisy) · ~51.5M params</text>
+
+  <text x="20" y="70" font-size="10" fill="#666" font-style="italic">in_conv: (6→88) · input (B, 6, 256, 256) [src+noisy_target]</text>
+
+  <text x="40" y="86" font-size="11" fill="#3a6fbc" font-weight="700">Encoder</text>
+  <text x="540" y="86" font-size="11" fill="#3f8a4f" font-weight="700">Decoder</text>
+
+  
+  <rect x="40" y="180" width="180" height="62" rx="6" fill="#fde4d4" stroke="#d94e2a" stroke-width="1.5"/><text x="130" y="198" text-anchor="middle" font-weight="600" fill="#a8391e">SourcePyramid</text><text x="130" y="214" text-anchor="middle" font-size="9" fill="#444">4 stages → f0..f3</text><text x="130" y="226" text-anchor="middle" font-size="9" fill="#444">(c1=88, c2=176, c3=352, c4=352)</text><text x="130" y="238" text-anchor="middle" font-size="9" fill="#444">~1813K params</text>
+  <rect x="260" y="90" width="90" height="44" rx="4" fill="#dbe9ff" stroke="#3a6fbc"/><text x="305" y="108" text-anchor="middle" font-weight="600" font-size="11">down (88)</text><text x="305" y="124" text-anchor="middle" font-size="9" fill="#444">256² × 88 · 147K</text><rect x="540" y="90" width="90" height="44" rx="4" fill="#dcf3df" stroke="#3f8a4f"/><text x="585" y="108" text-anchor="middle" font-weight="600" font-size="11">dec (88)</text><text x="585" y="124" text-anchor="middle" font-size="9" fill="#444">256² × 88 · 294K</text><rect x="640" y="90" width="80" height="44" rx="4" fill="#fff" stroke="#d94e2a" stroke-dasharray="4 3"/><text x="680" y="108" text-anchor="middle" font-size="11" fill="#a8391e">FiLM</text><text x="680" y="124" text-anchor="middle" font-size="9" fill="#444">15K</text><path d="M 350 112 L 540 112" stroke="#9aa3b2" stroke-dasharray="5 4" stroke-width="1.4"/><rect x="260" y="156" width="90" height="44" rx="4" fill="#dbe9ff" stroke="#3a6fbc"/><text x="305" y="174" text-anchor="middle" font-weight="600" font-size="11">down (176)</text><text x="305" y="190" text-anchor="middle" font-size="9" fill="#444">128² × 176 · 294K</text><rect x="540" y="156" width="90" height="44" rx="4" fill="#dcf3df" stroke="#3f8a4f"/><text x="585" y="174" text-anchor="middle" font-weight="600" font-size="11">dec (176)</text><text x="585" y="190" text-anchor="middle" font-size="9" fill="#444">128² × 176 · 1177K</text><rect x="640" y="156" width="80" height="44" rx="4" fill="#fff" stroke="#d94e2a" stroke-dasharray="4 3"/><text x="680" y="174" text-anchor="middle" font-size="11" fill="#a8391e">FiLM</text><text x="680" y="190" text-anchor="middle" font-size="9" fill="#444">61K</text><path d="M 350 178 L 540 178" stroke="#9aa3b2" stroke-dasharray="5 4" stroke-width="1.4"/><rect x="260" y="222" width="90" height="44" rx="4" fill="#dbe9ff" stroke="#3a6fbc"/><text x="305" y="240" text-anchor="middle" font-weight="600" font-size="11">down (352)</text><text x="305" y="256" text-anchor="middle" font-size="9" fill="#444">64² × 352 · 1177K</text><rect x="360" y="222" width="80" height="44" rx="4" fill="#e0d7f5" stroke="#5a4d99" /><text x="400" y="240" text-anchor="middle" font-size="11">attn</text><text x="400" y="256" text-anchor="middle" font-size="9" fill="#444">495K</text><rect x="540" y="222" width="90" height="44" rx="4" fill="#dcf3df" stroke="#3f8a4f"/><text x="585" y="240" text-anchor="middle" font-weight="600" font-size="11">dec (352)</text><text x="585" y="256" text-anchor="middle" font-size="9" fill="#444">64² × 352 · 4708K</text><rect x="640" y="222" width="80" height="44" rx="4" fill="#e0d7f5" stroke="#5a4d99" /><text x="680" y="240" text-anchor="middle" font-size="11">attn_dec</text><text x="680" y="256" text-anchor="middle" font-size="9" fill="#444">495K</text><rect x="730" y="222" width="80" height="44" rx="4" fill="#fff" stroke="#d94e2a" stroke-dasharray="4 3"/><text x="770" y="240" text-anchor="middle" font-size="11" fill="#a8391e">FiLM</text><text x="770" y="256" text-anchor="middle" font-size="9" fill="#444">247K</text><path d="M 350 244 L 540 244" stroke="#9aa3b2" stroke-dasharray="5 4" stroke-width="1.4"/><rect x="260" y="288" width="90" height="44" rx="4" fill="#dbe9ff" stroke="#3a6fbc"/><text x="305" y="306" text-anchor="middle" font-weight="600" font-size="11">down (352)</text><text x="305" y="322" text-anchor="middle" font-size="9" fill="#444">32² × 352 · 2354K</text><rect x="360" y="288" width="80" height="44" rx="4" fill="#e0d7f5" stroke="#5a4d99" /><text x="400" y="306" text-anchor="middle" font-size="11">attn</text><text x="400" y="322" text-anchor="middle" font-size="9" fill="#444">495K</text><rect x="540" y="288" width="90" height="44" rx="4" fill="#dcf3df" stroke="#3f8a4f"/><text x="585" y="306" text-anchor="middle" font-weight="600" font-size="11">dec (352)</text><text x="585" y="322" text-anchor="middle" font-size="9" fill="#444">32² × 352 · 4708K</text><rect x="640" y="288" width="80" height="44" rx="4" fill="#e0d7f5" stroke="#5a4d99" /><text x="680" y="306" text-anchor="middle" font-size="11">attn_dec</text><text x="680" y="322" text-anchor="middle" font-size="9" fill="#444">495K</text><rect x="730" y="288" width="80" height="44" rx="4" fill="#fff" stroke="#d94e2a" stroke-dasharray="4 3"/><text x="770" y="306" text-anchor="middle" font-size="11" fill="#a8391e">FiLM+xa</text><text x="770" y="322" text-anchor="middle" font-size="9" fill="#444">742K</text><path d="M 350 310 L 540 310" stroke="#9aa3b2" stroke-dasharray="5 4" stroke-width="1.4"/>
+  <rect x="260" y="354" width="370" height="54" rx="6" fill="#fff3cf" stroke="#b88a1d"/><text x="445" y="374" text-anchor="middle" font-weight="600">mid1 → mid_attn → mid2 (cm=704, 16px)</text><text x="445" y="392" text-anchor="middle" font-size="10" fill="#555">16² × 704 · ~16106K</text>
+
+  <text x="20" y="434" font-size="10" fill="#666" font-style="italic">out_conv: (88→3) · output velocity (B, 3, 256, 256)</text>
+</svg>
+</div>
+
+<h2 style="font-size:14px;margin:18px 0 6px 0;">What changed in exp59</h2>
+<p style="font-size:13px;">Adds CrossAttnCond block at the H/8 decoder level (32x32=1024 tokens). Q from decoder, KV from pyramid feature f3. ~500k extra params. Zero-init output proj for safe insertion. exp60 (80k promotion) hit face_lpips_sq=0.0997 on val_portraits — first sub-0.10 ever measured.</p>
+
+<dl class="meta">
+  <dt>kind</dt><dd>unet_noenc</dd>
+  <dt>method</dt><dd>rectified flow matching + LPIPS aux</dd>
+  <dt>source encoder</dt><dd>None</dd>
+  <dt>source-in-stem</dt><dd>True</dd>
+  <dt>model_ch</dt><dd>88</dd>
+  <dt>attn_resolutions</dt><dd>(16, 32, 64)</dd>
+  <dt>upsample</dt><dd>resize_conv</dd>
+  <dt>extras</dt><dd>decoder_attn, source_pyramid, cross_attn_h8</dd>
+</dl>
+</body>
+</html>

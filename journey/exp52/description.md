@@ -31,16 +31,3 @@ experiments compare against exp52 face_lpips_sq=0.101 on
 val_portraits.
 
 ---
-
-## Open follow-ups (3k era, updated 2026-05-16)
-- **More diverse real-photo sources**: Unsplash people, Places365
-  with people-filter, AFW/IJB-C in-the-wild faces. Currently FFHQ
-  alone biases toward studio-lit Western 25-35yo portraits.
-- **Curriculum option** (deferred): if portrait quality stalls below
-  some threshold, start from exp51's FFHQ-only checkpoint and
-  fine-tune on the 3k mixed set. Might give exp50-on-FFHQ quality
-  *and* exp50-on-legacy capability simultaneously.
-- **In-the-wild face val split**: a third val with small / off-center /
-  partially-occluded faces, real photos. Currently no val covers this
-  honestly; legacy val is group photos but skewed toward peripheral
-  subjects.

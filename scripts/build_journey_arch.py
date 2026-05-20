@@ -44,6 +44,7 @@ TIMELINE: list[tuple[str, dict]] = [
         "attn_resolutions": (8,),
         "upsample": "resize_conv",
         "extras": [],
+        "total_params_m": 35,  # rough — encoder + 64-mc UNet
         "notes": "Random-t x0_hat panels looked clean, but full DDIM reverse sampling collapsed to grey scribbles.",
     }),
     ("exp02", {
@@ -56,6 +57,7 @@ TIMELINE: list[tuple[str, dict]] = [
         "attn_resolutions": (8,),
         "upsample": "resize_conv",
         "extras": [],
+        "total_params_m": 35,
         "notes": "Loss dropped, structural similarity hurt — source at stem trades random-t reconstruction for SSIM.",
     }),
     ("exp07", {
@@ -68,6 +70,7 @@ TIMELINE: list[tuple[str, dict]] = [
         "attn_resolutions": (8,),
         "upsample": "resize_conv",
         "extras": [],
+        "total_params_m": 35,
         "notes": "Earlier 20k runs collapsed at ~step 5k; encoder freeze + flow eliminated the spike. LPIPS aux added next (exp08-lpips).",
     }),
     ("exp08", {
@@ -80,6 +83,7 @@ TIMELINE: list[tuple[str, dict]] = [
         "attn_resolutions": (8,),
         "upsample": "resize_conv",
         "extras": [],
+        "total_params_m": 49,
         "notes": "Removed encoder priors. 'Encoder helps' was 90% amortized ImageNet pretraining, not architecture.",
     }),
     ("exp09", {
@@ -92,6 +96,7 @@ TIMELINE: list[tuple[str, dict]] = [
         "attn_resolutions": (8,),
         "upsample": "pixel_shuffle",
         "extras": [],
+        "total_params_m": 49,
         "notes": "Pixel-shuffle didn't beat resize_conv at this scale.",
     }),
     ("exp10", {
@@ -104,6 +109,7 @@ TIMELINE: list[tuple[str, dict]] = [
         "attn_resolutions": (16, 32, 64),
         "upsample": "resize_conv",
         "extras": [],
+        "total_params_m": 49,
         "notes": "exp10/exp14v2 canonical baseline. Held through exp33 with only training/data changes.",
     }),
     ("exp34", {
@@ -116,7 +122,8 @@ TIMELINE: list[tuple[str, dict]] = [
         "attn_resolutions": (16, 32, 64),
         "upsample": "resize_conv",
         "extras": ["decoder_attn"],
-        "notes": "Mirrors encoder attn on the decoder side at the same resolutions. SD/SDXL convention.",
+        "total_params_m": 49.4,
+        "notes": "Mirrors encoder attn on the decoder side at the same resolutions. SD/SDXL convention. +~0.4M.",
     }),
     ("exp35", {
         "label": "+ source pyramid + FiLM modulation of the decoder",
@@ -128,6 +135,7 @@ TIMELINE: list[tuple[str, dict]] = [
         "attn_resolutions": (16, 32, 64),
         "upsample": "resize_conv",
         "extras": ["decoder_attn", "source_pyramid"],
+        "total_params_m": 51,
         "notes": "Tiny in-model conv pyramid (~1.8M) computes source features at 4 resolutions; FiLM γ,β modulate decoder activations. Canonical baseline from here forward.",
     }),
     ("exp36", {
@@ -140,6 +148,7 @@ TIMELINE: list[tuple[str, dict]] = [
         "attn_resolutions": (16, 32, 64),
         "upsample": "resize_conv",
         "extras": ["decoder_attn", "source_pyramid", "dit_bottleneck"],
+        "total_params_m": 79,
         "notes": "adaLN-zero modulated DiT blocks at the 16×16 token grid. +28M params for marginal lift.",
     }),
     ("exp47", {
@@ -152,13 +161,39 @@ TIMELINE: list[tuple[str, dict]] = [
         "dit_layers": 11,
         "dit_patch": 16,
         "extras": [],
-        "notes": "patch=16 patchify → 11 DiT blocks → unpatchify. 48.5M params. Block artifacts at this data scale.",
+        "total_params_m": 48.5,
+        "notes": "patch=16 patchify -> 11 DiT blocks -> unpatchify. 48.5M params. Block artifacts at this data scale.",
     }),
-    # No more arch changes after exp47/48. exp49 onwards revert to exp35-arch
-    # (or just the canonical decoder_attn + pyramid combo) for the data-scale
-    # experiments. We re-emit the exp35 signature at exp49 so the data
-    # narrative is clear, but no new architecture file is generated since the
-    # signature matches the previous exp35 entry.
+    # exp48-58 revert to the exp35-arch baseline for data-scale and recipe
+    # experiments (logit-normal t, diffusion-eps, mid aug, source dropout,
+    # LANCZOS resize, etc.). No architecture changes — signature matches
+    # exp35.
+    ("exp59", {
+        "label": "+ cross-attention conditioning at H/8 decoder level",
+        "kind": "unet_noenc",
+        "method": "rectified flow matching + LPIPS aux",
+        "encoder": None,
+        "source_in_stem": True,
+        "model_ch": 88,
+        "attn_resolutions": (16, 32, 64),
+        "upsample": "resize_conv",
+        "extras": ["decoder_attn", "source_pyramid", "cross_attn_h8"],
+        "total_params_m": 51.5,
+        "notes": "Adds CrossAttnCond block at the H/8 decoder level (32x32=1024 tokens). Q from decoder, KV from pyramid feature f3. ~500k extra params. Zero-init output proj for safe insertion. exp60 (80k promotion) hit face_lpips_sq=0.0997 on val_portraits — first sub-0.10 ever measured.",
+    }),
+    ("exp62", {
+        "label": "+ second cross-attn at H/4, drop source-in-stem concat",
+        "kind": "unet_noenc",
+        "method": "rectified flow matching + LPIPS aux",
+        "encoder": None,
+        "source_in_stem": False,  # KEY change: no source concat into in_conv
+        "model_ch": 88,
+        "attn_resolutions": (16, 32, 64),
+        "upsample": "resize_conv",
+        "extras": ["decoder_attn", "source_pyramid", "cross_attn_h8", "cross_attn_h4"],
+        "total_params_m": 49.3,
+        "notes": "in_conv goes 6->88 (3 src + 3 noisy_target) to 3->88 (just noisy_target). Source signal comes purely via SourcePyramid + FiLM + multi-scale cross-attn (H/8 and H/4). +500k params for the H/4 block (4096 tokens). Hypothesis: source-in-stem is redundant once pyramid+cross-attn is present, since x_t = (1-t)*source + t*target already contains source via the interpolant.",
+    }),
 ]
 
 
@@ -207,10 +242,13 @@ def render_unet_svg(arch: dict, title: str) -> str:
     has_dec_attn = "decoder_attn" in extras
     has_pyramid = "source_pyramid" in extras
     has_dit = "dit_bottleneck" in extras
+    has_xa_h8 = "cross_attn_h8" in extras
+    has_xa_h4 = "cross_attn_h4" in extras
     mc = arch.get("model_ch", 64)
     attn_set = set(arch.get("attn_resolutions") or ())
     upsample = arch.get("upsample", "resize_conv")
     method = arch.get("method", "")
+    source_in_stem = arch.get("source_in_stem", True)
 
     # Compute channel widths from mc.
     c1, c2, c3, c4, cm = mc, mc * 2, mc * 4, mc * 4, mc * 8
@@ -252,84 +290,141 @@ def render_unet_svg(arch: dict, title: str) -> str:
     else:
         enc_block = ""
 
+    # Pyramid: 4 stages, in_conv (3→c1) + 3 PyramidStage(ch_in, ch_out).
+    pyramid_k = (
+        int(3 * c1 * 9 / 1000)  # stem 3x3 conv
+        + sum(int(ch_in * ch_out * 9 / 1000) for ch_in, ch_out in [(c1, c2), (c2, c3), (c3, c4)])
+    )
     pyramid_block = (
-        '<rect x="40" y="180" width="160" height="50" rx="6" fill="#fde4d4" stroke="#d94e2a" stroke-width="1.5"/>'
-        '<text x="120" y="200" text-anchor="middle" font-weight="600" fill="#a8391e">SourcePyramid</text>'
-        '<text x="120" y="218" text-anchor="middle" font-size="10">'
-        f'4 stages -> (c1..c4) features</text>'
+        '<rect x="40" y="180" width="180" height="62" rx="6" fill="#fde4d4" stroke="#d94e2a" stroke-width="1.5"/>'
+        '<text x="130" y="198" text-anchor="middle" font-weight="600" fill="#a8391e">SourcePyramid</text>'
+        f'<text x="130" y="214" text-anchor="middle" font-size="9" fill="#444">4 stages → f0..f3</text>'
+        f'<text x="130" y="226" text-anchor="middle" font-size="9" fill="#444">(c1={c1}, c2={c2}, c3={c3}, c4={c4})</text>'
+        f'<text x="130" y="238" text-anchor="middle" font-size="9" fill="#444">~{pyramid_k}K params</text>'
     ) if has_pyramid else ""
 
+    # Per-block param estimates (in K) for the block-label subtitle.
+    # Rough: ResBlock ≈ 2·9·ch_in·ch_out (two 3x3 convs) + ch_in·ch_out (1x1 skip);
+    # Attn ≈ 4·ch² (Q,K,V,O 1x1 convs); FiLM ≈ 2·ch² (γ,β); CrossAttn ≈ 4·ch².
+    def resblock_params_k(ch_in: int, ch_out: int) -> int:
+        return int((2 * 9 * ch_in * ch_out + ch_in * ch_out) / 1000)
+    def attn_params_k(ch: int) -> int:
+        return int(4 * ch * ch / 1000)
+    def film_params_k(ch_target: int) -> int:
+        return int(2 * ch_target * ch_target / 1000)  # 1x1 conv producing 2·ch outputs from ch input
+    def xa_params_k(ch: int) -> int:
+        return int(4 * ch * ch / 1000)
+
+    # Cell sizing: 44px tall to fit two-line labels (block name + shape/params).
+    CELL_H = 44
+
     # Encoder/decoder mini-grid.
-    def lvl_row(y: int, label: str, ch: int, lvl_res: int, side: str) -> str:
+    def lvl_row(y: int, label: str, ch: int, ch_prev: int, lvl_res: int, side: str) -> str:
         attn_color = "#e0d7f5" if lvl_res in attn_set else "#fff"
         attn_stroke = "#5a4d99" if lvl_res in attn_set else "#bbb"
         attn_dash = "" if lvl_res in attn_set else 'stroke-dasharray="4 3"'
         rb_x = 260 if side == "enc" else 540
         attn_x = rb_x + 100
+        shape_str = f"{lvl_res}² × {ch}"
         if side == "dec":
-            # decoder also has FiLM and decoder_attn possibilities
+            film_label = "FiLM"
+            film_k = film_params_k(ch)
+            if (lvl_res == 32 and has_xa_h8) or (lvl_res == 64 and has_xa_h4):
+                film_label = "FiLM+xa"
+                film_k = film_params_k(ch) + xa_params_k(ch)
+            res_k = resblock_params_k(2 * ch, ch)  # decoder takes [up, skip] concat
             return (
-                f'<rect x="{rb_x}" y="{y}" width="90" height="36" rx="4" fill="#dcf3df" stroke="#3f8a4f"/>'
-                f'<text x="{rb_x+45}" y="{y+22}" text-anchor="middle" font-weight="600">dec ({ch})</text>'
+                f'<rect x="{rb_x}" y="{y}" width="90" height="{CELL_H}" rx="4" fill="#dcf3df" stroke="#3f8a4f"/>'
+                f'<text x="{rb_x+45}" y="{y+18}" text-anchor="middle" font-weight="600" font-size="11">dec ({ch})</text>'
+                f'<text x="{rb_x+45}" y="{y+34}" text-anchor="middle" font-size="9" fill="#444">{shape_str} · {res_k}K</text>'
                 + (
-                    f'<rect x="{attn_x}" y="{y}" width="80" height="36" rx="4" fill="{attn_color}" stroke="{attn_stroke}" {attn_dash}/>'
-                    f'<text x="{attn_x+40}" y="{y+22}" text-anchor="middle" font-size="11">attn_dec</text>'
+                    f'<rect x="{attn_x}" y="{y}" width="80" height="{CELL_H}" rx="4" fill="{attn_color}" stroke="{attn_stroke}" {attn_dash}/>'
+                    f'<text x="{attn_x+40}" y="{y+18}" text-anchor="middle" font-size="11">attn_dec</text>'
+                    f'<text x="{attn_x+40}" y="{y+34}" text-anchor="middle" font-size="9" fill="#444">{attn_params_k(ch)}K</text>'
                     if has_dec_attn and lvl_res in attn_set else ""
                 )
                 + (
-                    f'<rect x="{attn_x + (90 if (has_dec_attn and lvl_res in attn_set) else 0)}" y="{y}" width="80" height="36" rx="4" fill="#fff" stroke="#d94e2a" stroke-dasharray="4 3"/>'
-                    f'<text x="{attn_x + (90 if (has_dec_attn and lvl_res in attn_set) else 0)+40}" y="{y+22}" text-anchor="middle" font-size="11" fill="#a8391e">FiLM</text>'
+                    f'<rect x="{attn_x + (90 if (has_dec_attn and lvl_res in attn_set) else 0)}" y="{y}" width="80" height="{CELL_H}" rx="4" fill="#fff" stroke="#d94e2a" stroke-dasharray="4 3"/>'
+                    f'<text x="{attn_x + (90 if (has_dec_attn and lvl_res in attn_set) else 0)+40}" y="{y+18}" text-anchor="middle" font-size="11" fill="#a8391e">{film_label}</text>'
+                    f'<text x="{attn_x + (90 if (has_dec_attn and lvl_res in attn_set) else 0)+40}" y="{y+34}" text-anchor="middle" font-size="9" fill="#444">{film_k}K</text>'
                     if has_pyramid else ""
                 )
             )
         # encoder
+        res_k = resblock_params_k(ch_prev, ch)
         return (
-            f'<rect x="{rb_x}" y="{y}" width="90" height="36" rx="4" fill="#dbe9ff" stroke="#3a6fbc"/>'
-            f'<text x="{rb_x+45}" y="{y+22}" text-anchor="middle" font-weight="600">down ({ch})</text>'
+            f'<rect x="{rb_x}" y="{y}" width="90" height="{CELL_H}" rx="4" fill="#dbe9ff" stroke="#3a6fbc"/>'
+            f'<text x="{rb_x+45}" y="{y+18}" text-anchor="middle" font-weight="600" font-size="11">down ({ch})</text>'
+            f'<text x="{rb_x+45}" y="{y+34}" text-anchor="middle" font-size="9" fill="#444">{shape_str} · {res_k}K</text>'
             + (
-                f'<rect x="{attn_x}" y="{y}" width="80" height="36" rx="4" fill="{attn_color}" stroke="{attn_stroke}" {attn_dash}/>'
-                f'<text x="{attn_x+40}" y="{y+22}" text-anchor="middle" font-size="11">attn</text>'
+                f'<rect x="{attn_x}" y="{y}" width="80" height="{CELL_H}" rx="4" fill="{attn_color}" stroke="{attn_stroke}" {attn_dash}/>'
+                f'<text x="{attn_x+40}" y="{y+18}" text-anchor="middle" font-size="11">attn</text>'
+                f'<text x="{attn_x+40}" y="{y+34}" text-anchor="middle" font-size="9" fill="#444">{attn_params_k(ch)}K</text>'
                 if lvl_res in attn_set else ""
             )
         )
 
     rows = ""
+    ROW_STEP = 66  # 44 cell + 22 gap
+    chs = (c1, c2, c3, c4)
+    ch_prev_enc = mc  # in_conv output goes into first down block
     for i, lvl_res in enumerate(res):
-        y = 90 + i * 60
-        ch = (c1, c2, c3, c4)[i]
-        rows += lvl_row(y, str(lvl_res), ch, lvl_res, "enc")
-        rows += lvl_row(y, str(lvl_res), ch, lvl_res, "dec")
+        y = 90 + i * ROW_STEP
+        ch = chs[i]
+        rows += lvl_row(y, str(lvl_res), ch, ch_prev_enc, lvl_res, "enc")
+        rows += lvl_row(y, str(lvl_res), ch, ch_prev_enc, lvl_res, "dec")
         # Skip arrow.
-        rows += (f'<path d="M 350 {y+18} L 540 {y+18}" stroke="#9aa3b2" stroke-dasharray="5 4" stroke-width="1.4"/>')
+        rows += (f'<path d="M 350 {y+22} L 540 {y+22}" stroke="#9aa3b2" stroke-dasharray="5 4" stroke-width="1.4"/>')
+        ch_prev_enc = ch
 
     # Bottleneck.
-    bot_y = 90 + len(res) * 60
+    bot_y = 90 + len(res) * ROW_STEP
+    # mid blocks roughly: mid1 (c4 -> cm) + mid_attn + mid2 (cm -> cm).
+    mid_k = resblock_params_k(c4, cm) + attn_params_k(cm) + resblock_params_k(cm, cm)
     if has_dit:
+        # DiT block ≈ 12·dim² params per block (qkv 3·dim², o dim², mlp 8·dim²).
+        dit_k = int(12 * cm * cm * 4 / 1000)
         bot = (
-            f'<rect x="260" y="{bot_y}" width="370" height="46" rx="6" fill="#fff8f4" stroke="#d94e2a" stroke-width="1.6"/>'
+            f'<rect x="260" y="{bot_y}" width="370" height="54" rx="6" fill="#fff8f4" stroke="#d94e2a" stroke-width="1.6"/>'
             f'<text x="445" y="{bot_y+20}" text-anchor="middle" font-weight="700" fill="#a8391e">DiT bottleneck (4× adaLN-zero blocks @ {bottleneck_res}px, dim={cm})</text>'
-            f'<text x="445" y="{bot_y+36}" text-anchor="middle" font-size="10" fill="#555">replaces mid_attn + mid2</text>'
+            f'<text x="445" y="{bot_y+36}" text-anchor="middle" font-size="10" fill="#555">replaces mid_attn + mid2 · {bottleneck_res}² × {cm} · ~{dit_k}K</text>'
         )
     else:
         bot = (
-            f'<rect x="260" y="{bot_y}" width="370" height="46" rx="6" fill="#fff3cf" stroke="#b88a1d"/>'
-            f'<text x="445" y="{bot_y+20}" text-anchor="middle" font-weight="600">mid1 -> mid_attn -> mid2 (cm={cm}, {bottleneck_res}px)</text>'
+            f'<rect x="260" y="{bot_y}" width="370" height="54" rx="6" fill="#fff3cf" stroke="#b88a1d"/>'
+            f'<text x="445" y="{bot_y+20}" text-anchor="middle" font-weight="600">mid1 → mid_attn → mid2 (cm={cm}, {bottleneck_res}px)</text>'
+            f'<text x="445" y="{bot_y+38}" text-anchor="middle" font-size="10" fill="#555">{bottleneck_res}² × {cm} · ~{mid_k}K</text>'
         )
 
+    # Input / output stem annotations (top + bottom of the diagram).
+    in_ch = 6 if source_in_stem else 3
+    in_label = f"in_conv: ({in_ch}→{mc}) · input (B, {in_ch}, 256, 256){' [src+noisy_target]' if source_in_stem else ' [noisy_target only]'}"
+    out_label = f"out_conv: ({mc}→3) · output velocity (B, 3, 256, 256)"
+    in_y = 70  # above the level rows
+    out_y = bot_y + 80
+
+    # Total params subtitle.
+    total_m = arch.get("total_params_m")
+    total_str = f" · ~{total_m}M params" if total_m else ""
+
     # Compose.
-    svg_h = bot_y + 120
+    svg_h = out_y + 20
     svg = f"""
 <svg viewBox="0 0 850 {svg_h}" xmlns="http://www.w3.org/2000/svg" font-family="ui-monospace, monospace" font-size="11">
   <text x="20" y="30" font-size="14" font-weight="700">{html.escape(title)}</text>
-  <text x="20" y="50" font-size="11" fill="#555">{html.escape(method)} · mc={mc} · attn_res={sorted(attn_set) or 'none'} · upsample={upsample}</text>
+  <text x="20" y="50" font-size="11" fill="#555">{html.escape(method)} · mc={mc} · attn_res={sorted(attn_set) or 'none'} · upsample={upsample} · in_conv={'6→' if source_in_stem else '3→'}{mc} ch ({"src+noisy" if source_in_stem else "noisy only"}){total_str}</text>
 
-  <text x="40" y="80" font-size="11" fill="#3a6fbc" font-weight="700">Encoder</text>
-  <text x="540" y="80" font-size="11" fill="#3f8a4f" font-weight="700">Decoder</text>
+  <text x="20" y="{in_y}" font-size="10" fill="#666" font-style="italic">{html.escape(in_label)}</text>
+
+  <text x="40" y="86" font-size="11" fill="#3a6fbc" font-weight="700">Encoder</text>
+  <text x="540" y="86" font-size="11" fill="#3f8a4f" font-weight="700">Decoder</text>
 
   {enc_block}
   {pyramid_block}
   {rows}
   {bot}
+
+  <text x="20" y="{out_y}" font-size="10" fill="#666" font-style="italic">{html.escape(out_label)}</text>
 </svg>
 """
     return svg
